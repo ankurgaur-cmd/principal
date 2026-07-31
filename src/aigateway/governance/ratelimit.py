@@ -1,0 +1,49 @@
+"""Rate limiting: inbound per-tenant, and outbound per upstream pool.
+
+The second half is the one people forget. Upstream models sit in **separate
+rate-limit pools** — a frontier model does not draw from its predecessor's
+bucket — so tracking headroom per pool lets the router treat "this pool is
+saturated" as a routing input rather than as a 429 to retry blindly.
+"""
+
+from __future__ import annotations
+
+from ..config import Settings
+from ..errors import RateLimited
+
+
+class RateLimiter:
+    def __init__(self, settings: Settings, store):
+        self._s = settings
+        self._store = store
+
+    async def limit_for(self, tenant: str) -> int:
+        override = await self._store.get(f"rpm:{tenant}:limit")
+        return int(override) if override else self._s.default_tenant_rpm
+
+    async def check_tenant(self, tenant: str) -> int:
+        """Fixed-window counter. Cheap and adequate; swap for a sliding window
+        or token bucket if burst shaping matters to you."""
+        limit = await self.limit_for(tenant)
+        count = await self._store.incr_window(f"rpm:{tenant}", 60)
+        if count > limit:
+            raise RateLimited(
+                f"tenant '{tenant}' exceeded {limit} requests/min", retry_after=60
+            )
+        return count
+
+    async def note_upstream(self, pool: str) -> int:
+        return await self._store.incr_window(f"pool:{pool}", 60)
+
+    async def pool_pressure(self, pool: str) -> int:
+        """Requests observed against an upstream pool in the current window.
+
+        Exposed for the router and for dashboards; not yet a hard gate, because
+        the honest limit lives on the provider side and we only see it via 429s.
+        """
+        bucket_key = f"pool:{pool}"
+        import time
+
+        bucket = int(time.time() // 60)
+        raw = await self._store.get(f"{bucket_key}:{bucket}")
+        return int(raw or 0)

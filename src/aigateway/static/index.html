@@ -1,0 +1,1162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moon — AI Gateway Console</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --page: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --grid: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+
+  /* Tier is ordinal (light < standard < heavy), so it gets a single-hue
+     sequential ramp rather than categorical hues. Validated --ordinal. */
+  --tier-light: #86b6ef;
+  --tier-standard: #2a78d6;
+  --tier-heavy: #104281;
+
+  --series-1: #2a78d6;   /* the chosen candidate */
+  --series-alt: #c3c2b7; /* candidates not chosen — recessive by design */
+
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --success-text: #006300;
+
+  --radius: 10px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --tier-light: #184f95;
+    --tier-standard: #2a78d6;
+    --tier-heavy: #86b6ef;
+    --series-1: #3987e5;
+    --series-alt: #383835;
+    --success-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --page: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --grid: #2c2c2a;
+  --baseline: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --tier-light: #184f95;
+  --tier-standard: #2a78d6;
+  --tier-heavy: #86b6ef;
+  --series-1: #3987e5;
+  --series-alt: #383835;
+  --success-text: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--text-primary);
+  font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+h1 { font-size: 17px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); }
+h3 { font-size: 14px; }
+button, input, select, textarea { font: inherit; color: inherit; }
+
+header {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 20px; background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+}
+.logo { width: 22px; height: 22px; border-radius: 50%;
+  background: radial-gradient(circle at 32% 30%, var(--tier-light), var(--tier-heavy)); }
+.spacer { flex: 1; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 999px; font-size: 12px;
+  border: 1px solid var(--border); color: var(--text-secondary);
+  background: var(--page);
+}
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
+.dot.on { background: var(--good); }
+.dot.off { background: var(--critical); }
+
+.wrap { max-width: 1320px; margin: 0 auto; padding: 20px; }
+.grid { display: grid; grid-template-columns: minmax(320px, 400px) 1fr; gap: 20px; align-items: start; }
+@media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
+
+.card {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px; margin-bottom: 16px;
+}
+.card > h2 { margin-bottom: 12px; }
+
+label { display: block; font-size: 12px; color: var(--text-secondary); margin: 10px 0 4px; }
+textarea, input[type=text], select {
+  width: 100%; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--baseline); background: var(--page);
+}
+textarea { resize: vertical; min-height: 76px; font-family: var(--mono); font-size: 13px; }
+.row { display: flex; gap: 10px; }
+.row > * { flex: 1; min-width: 0; }
+
+button {
+  padding: 9px 14px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--page); color: var(--text-primary);
+}
+button:hover:not(:disabled) { border-color: var(--text-muted); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.primary { background: var(--series-1); border-color: var(--series-1); color: #fff; font-weight: 500; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+
+/* -- pipeline flow -- */
+.flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; align-items: stretch; }
+@media (max-width: 900px) { .flow { grid-template-columns: 1fr; } }
+.node {
+  border: 1px solid var(--border); border-radius: 8px; padding: 11px 12px;
+  background: var(--page); min-height: 96px; position: relative;
+  transition: border-color .2s, box-shadow .2s, opacity .2s;
+}
+.node.pending { opacity: .38; }
+.node.active { border-color: var(--series-1); box-shadow: 0 0 0 2px color-mix(in srgb, var(--series-1) 22%, transparent); }
+.node.done { border-color: var(--baseline); }
+.node.err { border-color: var(--critical); }
+.node .n { font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-muted); }
+.node .v { font-size: 15px; font-weight: 600; margin-top: 3px; word-break: break-word; line-height: 1.25; }
+.node .s { font-size: 11.5px; color: var(--text-secondary); margin-top: 4px; line-height: 1.45; }
+.node .t { position: absolute; top: 9px; right: 10px; font-family: var(--mono);
+  font-size: 10px; color: var(--text-muted); }
+/* Connector arrows live in the gap between nodes. */
+.conn { display: flex; align-items: center; justify-content: center; min-width: 22px; }
+.conn svg { width: 22px; height: 12px; }
+.conn path { stroke: var(--baseline); stroke-width: 2; fill: none; transition: stroke .2s; }
+.conn.lit path { stroke: var(--series-1); }
+@media (max-width: 900px) { .conn { transform: rotate(90deg); min-height: 18px; } }
+
+/* -- classifier layer lamps -- */
+.lamps { display: flex; gap: 4px; margin-top: 6px; }
+.lamp {
+  flex: 1; height: 4px; border-radius: 2px; background: var(--grid);
+}
+.lamp.hit { background: var(--series-1); }
+.lamp.skipped { background: var(--baseline); }
+
+/* -- plain-language explanation -- */
+.headline {
+  font-size: 17px; font-weight: 600; line-height: 1.4; margin-bottom: 14px;
+  letter-spacing: -0.01em;
+}
+.why { list-style: none; margin: 0; padding: 0; }
+.why li {
+  display: grid; grid-template-columns: 26px 1fr; gap: 11px;
+  padding: 11px 0; border-top: 1px solid var(--grid);
+  opacity: 0; transform: translateY(4px);
+  animation: reveal .28s ease forwards;
+}
+@keyframes reveal { to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .why li { animation: none; opacity: 1; transform: none; }
+}
+.why li:first-child { border-top: none; }
+.why .num {
+  width: 24px; height: 24px; border-radius: 50%; background: var(--series-1);
+  color: #fff; font-size: 12px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center;
+}
+.why .wt { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-muted); }
+.why .wv { font-size: 15px; font-weight: 600; margin: 2px 0 3px; }
+.why .wd { font-size: 13px; color: var(--text-secondary); line-height: 1.55; }
+
+.excl { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--grid); }
+.excl h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-muted); font-weight: 500; margin-bottom: 8px; }
+.excl-row { display: flex; gap: 9px; align-items: baseline; font-size: 13px;
+  padding: 4px 0; color: var(--text-secondary); }
+.excl-row b { color: var(--text-primary); font-weight: 500; min-width: 132px; }
+
+/* -- hop waterfall -- */
+.hops { margin-top: 12px; }
+.hop {
+  display: grid; grid-template-columns: 20px 1fr 150px 62px; gap: 10px;
+  align-items: center; padding: 7px 0; border-top: 1px solid var(--grid);
+  font-size: 12.5px;
+}
+.hop:first-child { border-top: none; }
+.hop .seq { color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
+.hop .who { min-width: 0; }
+.hop .who b { font-weight: 600; }
+.hop .who small { display: block; color: var(--text-secondary); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The waterfall track: bar offset shows when the hop started, width its duration. */
+.hop .track { height: 14px; background: var(--grid); border-radius: 3px; position: relative; }
+.hop .track i {
+  position: absolute; top: 0; bottom: 0; border-radius: 3px; min-width: 2px;
+  background: var(--series-1); display: block;
+}
+.hop .track i.err { background: var(--critical); }
+.hop .track i.wait { background: var(--warning); }
+.hop .track i.origin { background: var(--baseline); }
+.hop .ms { text-align: right; font-family: var(--mono); font-size: 11.5px;
+  color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.hostpill {
+  display: inline-block; font-family: var(--mono); font-size: 11px;
+  padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border);
+  background: var(--page); margin-right: 5px;
+}
+
+/* -- model pool -- */
+.pool { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.pmodel {
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 11px;
+  background: var(--page); font-size: 12.5px; position: relative;
+}
+.pmodel.chosen { border-color: var(--series-1); box-shadow: 0 0 0 2px color-mix(in srgb, var(--series-1) 22%, transparent); }
+.pmodel.out { opacity: .5; }
+.pmodel .pm-top { display: flex; align-items: center; gap: 6px; }
+.pmodel .pm-name { font-weight: 600; font-size: 13px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.pmodel .pm-meta { color: var(--text-secondary); margin-top: 5px; font-size: 11.5px;
+  font-variant-numeric: tabular-nums; }
+.pmodel .pm-tag { position: absolute; top: 9px; right: 10px; font-size: 10px;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+.hstat { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.h-healthy { background: var(--good); }
+.h-degraded { background: var(--warning); }
+.h-unhealthy { background: var(--critical); }
+.h-unconfigured { background: var(--text-muted); }
+.h-unknown { background: var(--baseline); }
+
+/* -- stat tiles -- */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; }
+.tile { border: 1px solid var(--border); border-radius: 8px; padding: 11px 12px; background: var(--page); }
+.tile .k { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; }
+.tile .v { font-size: 21px; font-weight: 600; margin-top: 4px; }
+.tile .v small { font-size: 12px; font-weight: 400; color: var(--text-secondary); }
+.tile .v.good { color: var(--success-text); }
+
+/* -- candidate cost bars -- */
+.bars { display: flex; flex-direction: column; gap: 8px; }
+.bar-row { display: grid; grid-template-columns: 150px 1fr 96px; gap: 10px; align-items: center; font-size: 13px; }
+.bar-track { height: 20px; background: var(--grid); border-radius: 4px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 0 4px 4px 0; background: var(--series-alt); transition: width .35s ease; }
+.bar-fill.chosen { background: var(--series-1); }
+.bar-label { font-family: var(--mono); font-size: 12px; text-align: right; color: var(--text-secondary); }
+.bar-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.bar-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tier-swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.t-light { background: var(--tier-light); }
+.t-standard { background: var(--tier-standard); }
+.t-heavy { background: var(--tier-heavy); }
+
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-top: 12px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+/* -- badges: icon + label, never colour alone -- */
+.badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
+  padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--page); }
+.badge b { font-weight: 600; }
+
+.reason {
+  font-family: var(--mono); font-size: 12px; line-height: 1.65;
+  background: var(--page); border: 1px solid var(--border); border-left: 3px solid var(--series-1);
+  border-radius: 6px; padding: 10px 12px; color: var(--text-secondary); white-space: pre-wrap;
+}
+.answer {
+  white-space: pre-wrap; background: var(--page); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px 14px; max-height: 320px; overflow: auto; font-size: 14px;
+}
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th { text-align: left; font-weight: 500; color: var(--text-muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: .05em; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+td { padding: 7px 8px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+tbody tr:last-child td { border-bottom: none; }
+.num { text-align: right; font-family: var(--mono); }
+.scroll { overflow-x: auto; }
+
+.err { border-left-color: var(--critical); color: var(--text-primary); }
+.hint { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+details summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo" aria-hidden="true"></div>
+  <h1>Moon — AI Gateway Console</h1>
+  <span class="pill" id="providers"><span class="dot"></span> checking…</span>
+  <span class="pill" id="stateBackend">state: —</span>
+  <div class="spacer"></div>
+  <button id="themeBtn" title="Toggle theme">◐ Theme</button>
+</header>
+
+<div class="wrap">
+<div class="grid">
+
+  <!-- ============ left: composer ============ -->
+  <div>
+    <div class="card" id="credCard">
+      <h2>API keys</h2>
+      <div id="credStatus"></div>
+      <details id="credForm" style="margin-top:12px">
+        <summary>Add or replace a key</summary>
+        <div style="margin-top:10px">
+          <div class="row">
+            <div>
+              <label for="credProvider">Provider</label>
+              <select id="credProvider">
+                <option value="anthropic">Anthropic</option>
+                <option value="openai">OpenAI</option>
+              </select>
+            </div>
+            <div>
+              <label for="credKey">API key</label>
+              <input type="password" id="credKey" placeholder="sk-…" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+          <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
+            <input type="checkbox" id="credPersist" style="width:auto;margin:0">
+            <span>Also save to <code>.env</code> so it survives a restart</span>
+          </label>
+          <div class="row" style="margin-top:10px">
+            <button class="primary" id="credSave">Validate &amp; use</button>
+            <button id="credAmbient" title="Use credentials the SDK can already resolve">Use ambient</button>
+          </div>
+          <div class="hint">
+            Validated against the vendor's free models endpoint — no tokens spent.
+            Held in memory only unless you tick the box. Never logged, never
+            returned by the API. Dev mode only.<br><br>
+            <b>Use ambient</b> skips the key entirely and uses whatever the SDK
+            can already resolve — an env var, or an OAuth profile from
+            <code>ant auth login</code>. Note that a Claude.ai or ChatGPT
+            <i>subscription</i> is not API access; you need API credits from
+            console.anthropic.com or platform.openai.com.
+          </div>
+        </div>
+      </details>
+      <div id="credMsg" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Query</h2>
+      <label for="prompt">Prompt</label>
+      <textarea id="prompt">Review this authentication middleware for security issues and race conditions.</textarea>
+
+      <label for="context">Shared context (the cacheable prefix — make it big to see caching work)</label>
+      <textarea id="context" style="min-height:60px">You are a senior code reviewer for a payments platform.</textarea>
+      <div class="hint" id="ctxSize">prefix ≈ 0 tokens</div>
+
+      <div class="row">
+        <div>
+          <label for="session">Session id</label>
+          <input type="text" id="session" value="demo-1">
+        </div>
+        <div>
+          <label for="intent">Intent hint</label>
+          <select id="intent">
+            <option value="">(let the gateway classify)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="effort">Effort</label>
+          <select id="effort">
+            <option value="">(from policy)</option>
+            <option>low</option><option>medium</option>
+            <option>high</option><option>xhigh</option><option>max</option>
+          </select>
+        </div>
+        <div>
+          <label for="maxTier">Max tier</label>
+          <select id="maxTier">
+            <option value="">(no cap)</option>
+            <option value="light">light</option>
+            <option value="standard">standard</option>
+            <option value="heavy">heavy</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="pace">Playback</label>
+          <select id="pace">
+            <option value="watch">Watch — step through the stages</option>
+            <option value="instant">Instant — real speed</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <button class="primary" id="sendBtn">Send</button>
+        <button id="resetBtn" title="Forget the session's warm model so the next call routes cold">Reset session</button>
+      </div>
+      <div class="hint">
+        Send twice with the same session to watch <b>cold_write → warm_read</b>.
+        Reset in between to route cold again.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Session totals</h2>
+      <div class="tiles">
+        <div class="tile"><div class="k">Requests</div><div class="v" id="tReq">0</div></div>
+        <div class="tile"><div class="k">Spend</div><div class="v" id="tSpend">$0</div></div>
+        <div class="tile"><div class="k">Cache saved</div><div class="v good" id="tSaved">$0</div></div>
+        <div class="tile"><div class="k">Cache hit rate</div><div class="v" id="tHit">—</div></div>
+      </div>
+      <div class="hint">
+        Cache-read tokens pinned at zero across repeated identical prefixes is the
+        clearest symptom of a broken caching design — so it is on the dashboard.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Fan-out — the cache pilot</h2>
+      <p style="font-size:13px;color:var(--text-secondary);margin:0 0 10px">
+        N sub-agents, one shared prefix. A cache entry is only readable once the
+        first response starts, so without a pilot all N pay a cold write.
+      </p>
+      <div class="row">
+        <div>
+          <label for="agents">Sub-agents</label>
+          <input type="text" id="agents" value="4">
+        </div>
+        <div>
+          <label for="pilotOn">Cache pilot</label>
+          <select id="pilotOn"><option value="true">enabled</option><option value="false">disabled</option></select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button id="fanBtn">Run fan-out</button>
+      </div>
+      <div id="fanResult" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <!-- ============ right: trace ============ -->
+  <div>
+    <div class="card">
+      <h2>Pipeline — live</h2>
+      <div class="flow">
+        <div class="node pending" id="s1">
+          <div class="n">1 · Query</div><div class="t"></div>
+          <div class="v">—</div><div class="s"></div>
+        </div>
+        <div class="conn" id="c1"><svg viewBox="0 0 22 12"><path d="M0 6 H16 M12 2 L16 6 L12 10"/></svg></div>
+
+        <div class="node pending" id="s2">
+          <div class="n">2 · Intent classifier</div><div class="t"></div>
+          <div class="v">—</div>
+          <div class="lamps" title="L0 declared · L1 rules · L2 embeddings · L3 small model">
+            <div class="lamp" id="l0"></div><div class="lamp" id="l1"></div>
+            <div class="lamp" id="l2"></div><div class="lamp" id="l3"></div>
+          </div>
+          <div class="s"></div>
+        </div>
+        <div class="conn" id="c2"><svg viewBox="0 0 22 12"><path d="M0 6 H16 M12 2 L16 6 L12 10"/></svg></div>
+
+        <div class="node pending" id="s3">
+          <div class="n">3 · Router</div><div class="t"></div>
+          <div class="v">—</div><div class="s"></div>
+        </div>
+        <div class="conn" id="c3"><svg viewBox="0 0 22 12"><path d="M0 6 H16 M12 2 L16 6 L12 10"/></svg></div>
+
+        <div class="node pending" id="s4">
+          <div class="n">4 · Model pool</div><div class="t"></div>
+          <div class="v">—</div><div class="s"></div>
+        </div>
+      </div>
+      <div id="reason" class="reason" style="margin-top:14px">Send a query to watch it routed.</div>
+    </div>
+
+    <div class="card" id="whyCard">
+      <h2>Why this model?</h2>
+      <div id="headline" class="headline">Send a query and this explains the choice in plain English.</div>
+      <ol id="why" class="why"></ol>
+      <div id="excluded"></div>
+      <details style="margin-top:12px">
+        <summary>Technical detail (the router's own log line)</summary>
+        <div id="technical" class="reason" style="margin-top:8px">—</div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Transaction trace — every hop</h2>
+      <div id="traceSummary" class="hint">Send a query to see every server this request touched.</div>
+      <div id="hops" class="hops"></div>
+    </div>
+
+    <div class="card">
+      <h2>Model pool — health &amp; availability</h2>
+      <div class="pool" id="pool"><div class="hint">Loading pool…</div></div>
+      <div class="legend">
+        <span><i class="hstat h-healthy" style="border-radius:50%"></i>healthy</span>
+        <span><i class="hstat h-degraded" style="border-radius:50%"></i>degraded</span>
+        <span><i class="hstat h-unhealthy" style="border-radius:50%"></i>circuit open</span>
+        <span><i class="hstat h-unconfigured" style="border-radius:50%"></i>no credentials</span>
+        <span style="margin-left:auto">
+          <button id="probeBtn" style="padding:3px 9px;font-size:12px">Probe now</button>
+          <button id="breakerBtn" style="padding:3px 9px;font-size:12px">Reset breakers</button>
+        </span>
+      </div>
+      <div class="hint">
+        Health has two sources: periodic free probes, and the outcome of real
+        traffic. The second drives the circuit breaker — after
+        <b id="thresholdN">3</b> consecutive failures a model leaves the
+        rotation, and the router stops considering it entirely.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Candidates considered — estimated cost</h2>
+      <div class="bars" id="bars"><div class="hint">No decision yet.</div></div>
+      <div class="legend">
+        <span><i style="background:var(--series-1)"></i>chosen</span>
+        <span><i style="background:var(--series-alt)"></i>not chosen</span>
+        <span style="margin-left:auto">tier:
+          <i class="tier-swatch t-light" style="display:inline-block"></i>light
+          <i class="tier-swatch t-standard" style="display:inline-block;margin-left:8px"></i>standard
+          <i class="tier-swatch t-heavy" style="display:inline-block;margin-left:8px"></i>heavy
+        </span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Response</h2>
+      <div class="tiles" style="margin-bottom:12px">
+        <div class="tile"><div class="k">Cost</div><div class="v" id="mCost">—</div></div>
+        <div class="tile"><div class="k">Latency</div><div class="v" id="mLat">—</div></div>
+        <div class="tile"><div class="k">Prompt tok</div><div class="v" id="mIn">—</div></div>
+        <div class="tile"><div class="k">Cached tok</div><div class="v" id="mCached">—</div></div>
+      </div>
+      <div class="answer" id="answer">—</div>
+    </div>
+
+    <div class="card">
+      <h2>Request history</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr>
+            <th>#</th><th>Intent</th><th>Model</th><th>Cache</th>
+            <th class="num">Cached tok</th><th class="num">Cost</th><th class="num">ms</th>
+          </tr></thead>
+          <tbody id="hist"><tr><td colspan="7" style="color:var(--text-muted)">No requests yet.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const money = (v) => v >= 0.01 ? "$" + v.toFixed(4) : "$" + v.toFixed(6);
+const TIERS = { light: "t-light", standard: "t-standard", heavy: "t-heavy" };
+
+// Cache state is conveyed by icon + label, never by colour alone.
+const CACHE_UI = {
+  warm_read:  { icon: "✓", label: "Reusing cache", note: "shared prompt billed at ~10% of normal" },
+  cold_write: { icon: "↑", label: "Building cache", note: "+25% now, ~90% off later this session" },
+  uncached:   { icon: "○", label: "Not cached", note: "shared prompt too short to cache here" },
+};
+
+let totals = { n: 0, spend: 0, saved: 0, read: 0, prompt: 0 };
+let history = [];
+
+/* ---------- theme ---------- */
+$("themeBtn").onclick = () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const next = cur === "dark" ? "light" : cur === "light" ? "dark"
+    : (matchMedia("(prefers-color-scheme: dark)").matches ? "light" : "dark");
+  document.documentElement.setAttribute("data-theme", next);
+};
+
+/* ---------- credentials ---------- */
+async function refreshHealth() {
+  try {
+    const h = await (await fetch("/health")).json();
+    const on = h.providers.length > 0;
+    $("providers").innerHTML =
+      `<span class="dot ${on ? "on" : "off"}"></span>` +
+      (on ? h.providers.join(" + ") : "no provider keys configured");
+    $("stateBackend").textContent = "state: " + h.state_backend.replace("Store", "").toLowerCase();
+  } catch { $("providers").textContent = "gateway unreachable"; }
+}
+
+async function refreshCreds() {
+  try {
+    const d = await (await fetch("/admin/credentials")).json();
+    $("credStatus").innerHTML = d.providers.map(p => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;
+                  border-bottom:1px solid var(--grid);font-size:13px">
+        <span class="dot ${p.configured ? "on" : "off"}"></span>
+        <b style="min-width:76px">${p.provider}</b>
+        <span style="color:var(--text-secondary);font-family:var(--mono);font-size:12px">
+          ${p.configured ? p.masked_key + " · " + p.source : "not configured"}
+        </span>
+        ${p.configured && d.editable
+          ? `<button data-clear="${p.provider}" style="margin-left:auto;padding:3px 9px;font-size:12px">remove</button>`
+          : ""}
+      </div>`).join("");
+
+    $("credStatus").querySelectorAll("[data-clear]").forEach(b => {
+      b.onclick = async () => {
+        await fetch("/admin/credentials/" + b.dataset.clear, { method: "DELETE" });
+        await refreshCreds(); await refreshHealth();
+      };
+    });
+
+    if (!d.editable) {
+      $("credForm").style.display = "none";
+      $("credMsg").innerHTML = `<div class="hint">Auth mode is <b>${d.auth_mode}</b> —
+        keys must come from the environment.</div>`;
+    } else if (d.providers.every(p => !p.configured)) {
+      $("credForm").open = true;   // nothing configured: lead with the form
+    }
+  } catch { $("credStatus").textContent = "could not read credential status"; }
+}
+
+async function submitCred(useAmbient) {
+  const btn = useAmbient ? $("credAmbient") : $("credSave");
+  const key = $("credKey").value.trim();
+  if (!useAmbient && !key) {
+    $("credMsg").innerHTML = '<div class="reason err">Enter a key first.</div>'; return;
+  }
+  btn.disabled = true; const label = btn.textContent; btn.textContent = "Validating…";
+  $("credMsg").innerHTML = '<div class="hint">Checking with the provider…</div>';
+  try {
+    const res = await fetch("/admin/credentials", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: $("credProvider").value,
+        api_key: useAmbient ? "" : key,
+        persist: !useAmbient && $("credPersist").checked,
+        use_ambient: useAmbient,
+      }),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d?.error?.message || "validation failed");
+    $("credKey").value = "";   // don't leave the key sitting in the DOM
+    $("credMsg").innerHTML = `<div class="reason">✓ ${d.provider}: ${d.validated} ·
+      key ${d.masked_key}${d.persisted_to_env ? " · saved to .env" : ""}</div>`;
+    await refreshCreds(); await refreshHealth();
+  } catch (e) {
+    $("credMsg").innerHTML = `<div class="reason err">✗ ${e.message}</div>`;
+  } finally { btn.disabled = false; btn.textContent = label; }
+}
+
+$("credSave").onclick = () => submitCred(false);
+$("credAmbient").onclick = () => submitCred(true);
+
+/* ---------- boot ---------- */
+async function boot() {
+  await refreshHealth();
+  await refreshCreds();
+  await refreshPool();
+  // Keep the pool live while idle so a probe result or a breaker opening is
+  // visible without sending a request.
+  setInterval(() => refreshPool(lastChosen), 15000);
+
+  try {
+    const p = await (await fetch("/admin/policy")).json();
+    const sel = $("intent");
+    p.intents.forEach(i => {
+      const o = document.createElement("option");
+      o.value = i.intent;
+      o.textContent = `${i.intent} → ${i.min_tier}`;
+      sel.appendChild(o);
+    });
+  } catch {}
+  updateCtxSize();
+}
+
+function updateCtxSize() {
+  // Mirrors the server-side estimator (~3.6 chars/token) closely enough to
+  // show which side of a model's cacheable minimum you are on.
+  const n = Math.round(($("context").value.length + $("prompt").value.length) / 3.6);
+  $("ctxSize").textContent = `prefix ≈ ${n.toLocaleString()} tokens` +
+    (n < 512 ? " — too short to cache anywhere" :
+     n < 1024 ? " — caches on Opus 5 only (512 min)" :
+     n < 4096 ? " — caches on Opus 5 / Sonnet 5, not Haiku (4096 min)" :
+                " — caches on every model");
+}
+$("context").oninput = updateCtxSize;
+$("prompt").oninput = updateCtxSize;
+
+/* ---------- pipeline flow ---------- */
+const NODES = ["s1", "s2", "s3", "s4"];
+const CONNS = ["c1", "c2", "c3"];
+
+function setNode(id, { value, sub, ms, state }) {
+  const el = $(id);
+  el.classList.remove("pending", "active", "done", "err");
+  el.classList.add(state || "done");
+  if (value !== undefined) el.querySelector(".v").innerHTML = value;
+  if (sub !== undefined) el.querySelector(".s").innerHTML = sub;
+  if (ms !== undefined) el.querySelector(".t").textContent = ms + "ms";
+}
+
+function markActive(id) {
+  const el = $(id);
+  el.classList.remove("pending", "done");
+  el.classList.add("active");
+  // Light the connector feeding this node.
+  const idx = NODES.indexOf(id);
+  if (idx > 0) $(CONNS[idx - 1]).classList.add("lit");
+}
+
+function resetFlow() {
+  NODES.forEach(id => {
+    const el = $(id);
+    el.className = "node pending";
+    el.querySelector(".v").textContent = "—";
+    el.querySelector(".s").textContent = "";
+    el.querySelector(".t").textContent = "";
+  });
+  CONNS.forEach(id => $(id).classList.remove("lit"));
+  ["l0","l1","l2","l3"].forEach(id => $(id).className = "lamp");
+}
+
+/* Which classifier layer produced the answer. Cheaper layers that ran and
+   deferred are shown as "skipped" so the escalation path is visible. */
+const LAYER_INDEX = { declared: 0, rules: 1, embedding: 2, llm: 3, "llm-cached": 3, default: 3 };
+function setLamps(source) {
+  const hit = LAYER_INDEX[source];
+  ["l0","l1","l2","l3"].forEach((id, i) => {
+    $(id).className = "lamp" + (i === hit ? " hit" : i < hit ? " skipped" : "");
+  });
+}
+
+/* ---------- model pool ---------- */
+let poolCache = [];
+
+async function refreshPool(chosen) {
+  try {
+    const d = await (await fetch("/admin/pool")).json();
+    poolCache = d.models;
+    $("thresholdN").textContent = d.breaker_failure_threshold;
+    renderPool(chosen);
+  } catch { $("pool").innerHTML = '<div class="hint">Could not read pool status.</div>'; }
+}
+
+function renderPool(chosen) {
+  $("pool").innerHTML = poolCache.map(m => {
+    const out = m.status === "unhealthy" || m.status === "unconfigured";
+    const lat = m.p50_latency_ms != null ? `${m.p50_latency_ms}ms p50` : "no traffic yet";
+    const rate = m.success_rate != null ? ` · ${(m.success_rate * 100).toFixed(0)}% ok` : "";
+    return `
+      <div class="pmodel ${m.model === chosen ? "chosen" : ""} ${out ? "out" : ""}">
+        <span class="pm-tag">${m.tier}</span>
+        <div class="pm-top">
+          <span class="hstat h-${m.status}" title="${m.status}"></span>
+          <span class="pm-name" title="${m.model}">${m.model}</span>
+        </div>
+        <div class="pm-meta">
+          ${m.status}${m.breaker !== "closed" ? ` · breaker ${m.breaker}` : ""}<br>
+          ${lat}${rate}<br>
+          $${m.price_in_per_mtok}/$${m.price_out_per_mtok} per Mtok ·
+          cache min ${m.min_cacheable_tokens.toLocaleString()}
+          ${m.last_error ? `<br><span style="color:var(--critical)">${m.last_error}</span>` : ""}
+        </div>
+      </div>`;
+  }).join("");
+}
+
+$("probeBtn").onclick = async () => {
+  await fetch("/admin/pool/probe", { method: "POST" });
+  await refreshPool();
+};
+$("breakerBtn").onclick = async () => {
+  await fetch("/admin/pool/reset", { method: "POST" });
+  await refreshPool();
+};
+
+/* ---------- candidate bars ---------- */
+function renderBars(considered) {
+  const box = $("bars");
+  if (!considered || !considered.length) { box.innerHTML = '<div class="hint">No alternatives.</div>'; return; }
+  const max = Math.max(...considered.map(c => c.estimated_cost_usd)) || 1;
+  box.innerHTML = considered.map(c => `
+    <div class="bar-row">
+      <div class="bar-name">
+        <span class="tier-swatch ${TIERS[c.tier] || ""}" title="${c.tier} tier"></span>
+        <span title="${c.model}">${c.model}</span>
+      </div>
+      <div class="bar-track">
+        <div class="bar-fill ${c.chosen ? "chosen" : ""}" style="width:${Math.max(2, c.estimated_cost_usd / max * 100)}%"></div>
+      </div>
+      <div class="bar-label">${money(c.estimated_cost_usd)}</div>
+    </div>`).join("");
+}
+
+/* ---------- main send ---------- */
+$("sendBtn").onclick = async () => {
+  const btn = $("sendBtn");
+  btn.disabled = true; btn.textContent = "Routing…";
+  resetFlow();
+  $("reason").className = "reason";
+  $("reason").textContent = "…";
+
+  const messages = [];
+  if ($("context").value.trim()) messages.push({ role: "system", content: $("context").value });
+  messages.push({ role: "user", content: $("prompt").value });
+
+  const body = {
+    model: "auto",
+    messages,
+    max_tokens: 1024,
+    x_gateway: {
+      session_id: $("session").value || null,
+      intent: $("intent").value || null,
+      effort: $("effort").value || null,
+      max_tier: $("maxTier").value || null,
+    },
+  };
+
+  markActive("s1");
+
+  try {
+    // Streamed so each stage renders as it actually completes — the timings
+    // shown are measured, not animated.
+    const res = await fetch("/demo/trace", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-tenant-id": "demo", "x-agent-id": "console" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d?.error?.message || `HTTP ${res.status}`);
+    }
+    await consumeTrace(res);
+  } catch (e) {
+    $("reason").className = "reason err";
+    $("reason").textContent = "✗ " + e.message;
+    NODES.forEach(id => { if ($(id).classList.contains("active")) setNode(id, { state: "err" }); });
+  } finally {
+    btn.disabled = false; btn.textContent = "Send";
+    refreshPool(lastChosen);
+  }
+};
+
+let lastChosen = null;
+
+/* Routing takes single-digit milliseconds, so replaying the stream at true
+   speed makes every stage land in the same frame — technically honest and
+   completely unwatchable. "Watch" mode holds each stage for a beat so a human
+   can follow the sequence; the ms figure on each node is always the real
+   measurement, never the paced one. */
+const PACE_MS = { watch: 750, instant: 0 };
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function consumeTrace(res) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const pace = PACE_MS[$("pace").value] ?? 0;
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop();              // keep the trailing partial frame
+    for (const frame of frames) {
+      const line = frame.split("\n").find(l => l.startsWith("data: "));
+      if (!line) continue;
+      const raw = line.slice(6);
+      if (raw === "[DONE]") return;
+      const ev = JSON.parse(raw);
+      handleStage(ev);
+      // Don't pace bookkeeping stages nobody is looking at.
+      if (pace && !["accepted", "budget", "done"].includes(ev.stage)) await sleep(pace);
+    }
+  }
+}
+
+/* ---------- hop waterfall ---------- */
+const HOP_KIND = {
+  origin:     { icon: "◉", cls: "origin" },
+  classifier: { icon: "◍", cls: "" },
+  model:      { icon: "▶", cls: "" },
+  cache_wait: { icon: "⏸", cls: "wait" },
+  probe:      { icon: "◌", cls: "" },
+};
+
+function renderHops(t) {
+  const total = Math.max(t.total_ms, 1);
+  $("traceSummary").innerHTML = `
+    <b>${t.hop_count} hop(s)</b> · ${t.total_ms}ms total ·
+    ${t.upstream_ms}ms waiting on upstream ·
+    <b>${t.gateway_overhead_ms}ms</b> gateway overhead
+    ${t.failed_hops ? ` · <span style="color:var(--critical)">${t.failed_hops} failed</span>` : ""}
+    <br>servers: ${t.hosts_contacted.length
+      ? t.hosts_contacted.map(h => `<span class="hostpill">${h}</span>`).join("")
+      : "<i>none — nothing left the gateway</i>"}
+    <br><span style="font-family:var(--mono);font-size:11px">trace ${t.trace_id}</span>`;
+
+  $("hops").innerHTML = t.hops.map(h => {
+    const kind = HOP_KIND[h.kind] || { icon: "•", cls: "" };
+    const cls = h.status !== "ok" ? "err" : kind.cls;
+    // Offset + width place each bar on a shared timeline, so a slow hop is
+    // visible as position and length rather than a number to compare by eye.
+    const left = (h.started_ms / total) * 100;
+    const width = Math.max((h.latency_ms / total) * 100, 1.5);
+    const sub = [
+      h.model, h.endpoint,
+      h.attempt > 1 ? `attempt ${h.attempt}` : "",
+      h.http_status ? `HTTP ${h.http_status}` : "",
+      h.tokens_in ? `${h.tokens_in.toLocaleString()} in / ${h.tokens_out.toLocaleString()} out` : "",
+      h.cached_tokens ? `${h.cached_tokens.toLocaleString()} cached` : "",
+      h.detail,
+    ].filter(Boolean).join(" · ");
+
+    return `
+      <div class="hop">
+        <span class="seq">${kind.icon}</span>
+        <div class="who">
+          <b>${h.label}</b>${h.status !== "ok" ? ` <span style="color:var(--critical)">${h.status}</span>` : ""}
+          <small title="${sub}">${sub || "—"}</small>
+        </div>
+        <div class="track"><i class="${cls}" style="left:${left}%;width:${width}%"></i></div>
+        <div class="ms">${h.latency_ms}ms</div>
+      </div>`;
+  }).join("");
+}
+
+/* ---------- the explanation ---------- */
+function renderWhy(ex) {
+  $("headline").textContent = ex.headline;
+
+  $("why").innerHTML = ex.steps.map((s, i) => `
+    <li style="animation-delay:${i * 60}ms">
+      <span class="num">${s.n}</span>
+      <div>
+        <div class="wt">${s.title}</div>
+        <div class="wv">${s.value}</div>
+        <div class="wd">${s.detail}</div>
+      </div>
+    </li>`).join("");
+
+  $("excluded").innerHTML = ex.excluded.length ? `
+    <div class="excl">
+      <h3>Ruled out (${ex.excluded.length})</h3>
+      ${ex.excluded.map(e => `
+        <div class="excl-row"><b>${e.model}</b><span>${e.plain}</span></div>`).join("")}
+    </div>` : "";
+
+  $("technical").textContent = ex.technical;
+}
+
+function handleStage(ev) {
+  switch (ev.stage) {
+    case "accepted":
+      setNode("s1", { value: "accepted", sub: `tenant <b>${ev.tenant}</b>`, ms: ev.elapsed_ms });
+      markActive("s2");
+      break;
+
+    case "canonicalised":
+      setNode("s1", {
+        value: `${(ev.prefix_tokens + ev.volatile_tokens).toLocaleString()} tok`,
+        sub: `prefix ${ev.prefix_tokens.toLocaleString()} · volatile ${ev.volatile_tokens}` +
+             (ev.tools ? ` · ${ev.tools} tool(s)` : ""),
+        ms: ev.elapsed_ms,
+      });
+      break;
+
+    case "classified":
+      setLamps(ev.source);
+      setNode("s2", {
+        value: ev.intent,
+        sub: `${Math.round(ev.confidence * 100)}% via <b>${ev.source}</b>` +
+             (ev.rationale ? `<br>${ev.rationale}` : ""),
+        ms: ev.elapsed_ms,
+      });
+      markActive("s3");
+      break;
+
+    case "budget":
+      if (ev.degraded) {
+        $("reason").className = "reason err";
+        $("reason").textContent = "⚠ " + ev.message;
+      }
+      break;
+
+    case "routed":
+      lastChosen = ev.model;
+      setNode("s3", {
+        value: ev.model,
+        sub: `<span class="badge"><span class="tier-swatch ${TIERS[ev.tier]}"></span>${ev.tier}</span> ` +
+             `<span class="badge">${ev.provider}</span>` +
+             (ev.degraded ? ' <span class="badge"><b>⚠ degraded</b></span>' : "") +
+             `<br>${ev.considered.length} candidate(s) scored`,
+        ms: ev.elapsed_ms,
+      });
+      renderBars(ev.considered);
+      renderPool(ev.model);
+      if (ev.explain) renderWhy(ev.explain);
+      $("reason").className = "reason";
+      $("reason").textContent = ev.explain ? ev.explain.headline : ev.reason;
+      markActive("s4");
+      break;
+
+    case "cache": {
+      const c = CACHE_UI[(ev.state || "").split(" ")[0]] || { icon: "•", label: ev.state };
+      setNode("s4", {
+        value: `${c.icon} ${c.label}`,
+        sub: `pilot <b>${ev.pilot_role}</b> · ${ev.plan}`,
+        ms: ev.elapsed_ms,
+        state: "active",
+      });
+      break;
+    }
+
+    case "served":
+      setNode("s4", {
+        value: ev.model,
+        sub: `${money(ev.actual_cost_usd)} · ${ev.latency_ms}ms` +
+             (ev.cache_read_tokens ? `<br>${ev.cache_read_tokens.toLocaleString()} tok read from cache` : "") +
+             (ev.fallback_chain.length ? `<br>fallback: ${ev.fallback_chain.join(" → ")}` : ""),
+        ms: ev.elapsed_ms,
+      });
+      break;
+
+    case "hops":
+      renderHops(ev);
+      break;
+
+    case "done":
+      render(ev.response);
+      break;
+
+    case "error":
+      $("reason").className = "reason err";
+      $("reason").textContent = "✗ " + ev.error;
+      NODES.forEach(id => { if ($(id).classList.contains("active")) setNode(id, { state: "err" }); });
+      break;
+  }
+}
+
+function render(data) {
+  const g = data.x_gateway;
+  const cacheKey = (g.cache_state || "").split(" ")[0];
+  const cache = CACHE_UI[cacheKey] || { icon: "•", label: cacheKey || "—", note: "" };
+
+  // The flow nodes were already filled in from the streamed stages; render()
+  // only handles the settled numbers, the answer, and the history.
+  $("mCost").textContent = money(g.actual_cost_usd);
+  $("mLat").innerHTML = g.latency_ms + "<small> ms</small>";
+  $("mIn").textContent = data.usage.prompt_tokens.toLocaleString();
+  $("mCached").innerHTML = data.usage.cache_read_tokens.toLocaleString() +
+    (data.usage.cache_write_tokens ? `<small> (+${data.usage.cache_write_tokens.toLocaleString()} written)</small>` : "");
+
+  $("answer").textContent = data.choices[0].message.content || "(tool call / empty)";
+
+  totals.n++;
+  totals.spend += g.actual_cost_usd;
+  totals.saved += g.cache_savings_usd;
+  totals.read += data.usage.cache_read_tokens;
+  totals.prompt += data.usage.prompt_tokens;
+  $("tReq").textContent = totals.n;
+  $("tSpend").textContent = money(totals.spend);
+  $("tSaved").textContent = money(totals.saved);
+  $("tHit").textContent = totals.prompt ? (totals.read / totals.prompt * 100).toFixed(0) + "%" : "—";
+
+  history.unshift({
+    n: totals.n, intent: g.resolved_intent, model: g.chosen_model, tier: g.tier,
+    cache: cache.icon + " " + cache.label, cached: data.usage.cache_read_tokens,
+    cost: g.actual_cost_usd, ms: g.latency_ms,
+  });
+  $("hist").innerHTML = history.map(h => `
+    <tr>
+      <td>${h.n}</td><td>${h.intent}</td>
+      <td><span class="tier-swatch ${TIERS[h.tier]}" style="display:inline-block;margin-right:6px"></span>${h.model}</td>
+      <td>${h.cache}</td>
+      <td class="num">${h.cached.toLocaleString()}</td>
+      <td class="num">${money(h.cost)}</td>
+      <td class="num">${h.ms}</td>
+    </tr>`).join("");
+}
+
+/* ---------- reset ---------- */
+$("resetBtn").onclick = async () => {
+  await fetch(`/demo/reset/${encodeURIComponent($("session").value || "demo-1")}`,
+    { method: "POST", headers: { "x-tenant-id": "demo" } });
+  $("reason").className = "reason";
+  $("reason").textContent = "Session forgotten — the next request routes cold.";
+};
+
+/* ---------- fan-out ---------- */
+$("fanBtn").onclick = async () => {
+  const btn = $("fanBtn");
+  btn.disabled = true; btn.textContent = "Running…";
+  $("fanResult").innerHTML = '<div class="hint">Firing sub-agents…</div>';
+  try {
+    const res = await fetch("/demo/fanout", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-tenant-id": "demo", "x-agent-id": "fanout" },
+      body: JSON.stringify({
+        prompt: $("prompt").value,
+        shared_context: $("context").value,
+        agents: Math.max(1, Math.min(12, parseInt($("agents").value) || 4)),
+        session_id: ($("session").value || "demo-1") + "-fanout",
+        intent: $("intent").value || null,
+        pilot_enabled: $("pilotOn").value === "true",
+      }),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d?.error?.message || "fan-out failed");
+
+    const pilots = d.agents.filter(a => a.pilot_role === "pilot").length;
+    const readers = d.agents.filter(a => a.cache_read_tokens > 0).length;
+    $("fanResult").innerHTML = `
+      <div class="tiles" style="margin-bottom:10px">
+        <div class="tile"><div class="k">Total cost</div><div class="v">${money(d.total_cost_usd)}</div></div>
+        <div class="tile"><div class="k">Cache reads</div><div class="v">${readers}/${d.agents.length}</div></div>
+        <div class="tile"><div class="k">Writes</div><div class="v">${d.total_cache_write_tokens.toLocaleString()}</div></div>
+      </div>
+      <div class="scroll"><table>
+        <thead><tr><th>Agent</th><th>Role</th><th class="num">Read</th><th class="num">Write</th><th class="num">Cost</th></tr></thead>
+        <tbody>${d.agents.map(a => a.error
+          ? `<tr><td>${a.agent}</td><td colspan="4" style="color:var(--critical)">${a.error}</td></tr>`
+          : `<tr><td>${a.agent}</td><td>${a.pilot_role === "pilot" ? "✎ pilot" : a.cache_read_tokens ? "✓ reader" : "○ cold"}</td>
+              <td class="num">${a.cache_read_tokens.toLocaleString()}</td>
+              <td class="num">${a.cache_write_tokens.toLocaleString()}</td>
+              <td class="num">${money(a.cost_usd)}</td></tr>`).join("")}</tbody>
+      </table></div>
+      <div class="hint">${pilots} pilot, ${readers} reader(s), ${d.wall_clock_ms} ms wall clock.
+        Toggle the pilot off and re-run to compare total writes.</div>`;
+  } catch (e) {
+    $("fanResult").innerHTML = `<div class="reason err">✗ ${e.message}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = "Run fan-out";
+  }
+};
+
+boot();
+</script>
+</body>
+</html>

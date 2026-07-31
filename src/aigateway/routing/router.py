@@ -1,0 +1,380 @@
+"""Cache-aware, session-sticky model router.
+
+The design decision that shapes everything else: **prompt caches are
+model-scoped**. Routing turn 3 of a workflow to a cheaper model than turns 1-2
+throws away a warm prefix and pays a cold write on the new model. For the
+repetitive workflows a multi-agent system produces, a naively "optimal"
+per-request choice routinely costs *more* than pinning one model per session.
+
+So:
+
+* the routing unit is the **session**, not the request;
+* the cost function **prices in the cache transition**, not just the sticker
+  rate; and
+* mid-session tier changes are **escalation-only** — going down almost never
+  recovers the write you just paid for.
+
+Everything is a scored comparison, and every decision carries a human-readable
+``reason`` into the response and the record. A router you cannot audit is a
+router you cannot tune.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+from ..cache.hints import CachePlan, plan_cache
+from ..catalog import Capability, ModelSpec, Tier, get_model
+from ..config import Settings
+from ..tokens import estimate_request_tokens
+from .policy import policy_for, tier_from_name
+
+log = logging.getLogger(__name__)
+
+# Expected output volume by effort level, for cost scoring only. max_tokens is a
+# ceiling, not a forecast — scoring against the ceiling would make every model
+# look output-dominated and flatten the comparison.
+_EXPECTED_OUTPUT = {"low": 600, "medium": 1200, "high": 2500, "xhigh": 5000, "max": 8000}
+
+
+@dataclass
+class Candidate:
+    model: ModelSpec
+    cost_usd: float
+    cache_state: str
+    plan: CachePlan
+    note: str = ""
+
+
+@dataclass
+class RoutingDecision:
+    model: ModelSpec
+    tier: Tier
+    effort: str
+    reason: str
+    cache_state: str
+    cache_plan: CachePlan
+    estimated_cost_usd: float
+    prefix_tokens: int
+    volatile_tokens: int
+    considered: list[Candidate] = field(default_factory=list)
+    # Models that did NOT qualify, and why. Surfaced because "who was ruled out
+    # and for what reason" explains a routing decision at least as well as the
+    # winner does.
+    excluded: list[dict] = field(default_factory=list)
+    degraded: bool = False
+    escalated_from: str | None = None
+    sticky: bool = False
+    pinned: bool = False
+    required_tier: Tier = Tier.LIGHT
+    intent: str = ""
+
+
+class Router:
+    def __init__(self, settings: Settings, store, providers, health=None):
+        """``providers`` is a live source of enabled provider names.
+
+        Accepts either a plain set (tests, fixed deployments) or anything with
+        an ``.enabled`` property — in practice the ProviderRegistry. It must be
+        read per request rather than snapshotted, because credentials can be
+        added at runtime and a snapshot would keep routing to a provider that
+        is no longer configured, or ignore one that just became available.
+        """
+        self._s = settings
+        self._store = store
+        self._providers_source = providers
+        # Optional: when present, models whose circuit breaker is open are not
+        # candidates. Health is a routing input, not an error path.
+        self._health = health
+
+    @property
+    def _providers(self) -> set[str]:
+        source = self._providers_source
+        return source.enabled if hasattr(source, "enabled") else source
+
+    # -- session stickiness -------------------------------------------------
+    @staticmethod
+    def _session_key(session_id: str) -> str:
+        return f"session:{session_id}:model"
+
+    async def warm_model_for(self, session_id: str | None) -> ModelSpec | None:
+        if not session_id:
+            return None
+        key = await self._store.get(self._session_key(session_id))
+        return get_model(key) if key else None
+
+    async def remember(self, session_id: str | None, model: ModelSpec) -> None:
+        if not session_id:
+            return
+        # TTL tracks the prompt-cache window: once the provider cache expires,
+        # stickiness is no longer buying anything.
+        await self._store.set(
+            self._session_key(session_id), model.key, ttl=self._s.session_ttl_seconds
+        )
+
+    # -- scoring ------------------------------------------------------------
+    def _cost(
+        self,
+        model: ModelSpec,
+        prefix_tokens: int,
+        volatile_tokens: int,
+        expected_output: int,
+        is_warm: bool,
+    ) -> tuple[float, str, CachePlan]:
+        plan = plan_cache_for(model, prefix_tokens, volatile_tokens)
+        price_in = model.price_in_per_mtok / 1_000_000
+        price_out = model.price_out_per_mtok / 1_000_000
+
+        if not plan.cacheable:
+            cache_state = "uncached"
+            input_cost = (prefix_tokens + volatile_tokens) * price_in
+        elif is_warm:
+            cache_state = "warm_read"
+            input_cost = (
+                prefix_tokens * price_in * model.cache_read_multiplier
+                + volatile_tokens * price_in
+            )
+        else:
+            cache_state = "cold_write"
+            input_cost = (
+                prefix_tokens * price_in * model.cache_write_multiplier(self._s.cache_ttl)
+                + volatile_tokens * price_in
+            )
+
+        return input_cost + expected_output * price_out, cache_state, plan
+
+    def _capable(
+        self, model: ModelSpec, canonical, total_tokens: int, require_available: bool = True
+    ) -> str | None:
+        """Return a rejection reason, or None if the model can serve this."""
+        if require_available and model.provider not in self._providers:
+            return "provider not configured"
+        if require_available and self._health and not self._health.is_available(model.key):
+            return "circuit open (unhealthy)"
+        if canonical.tools and not model.supports(Capability.TOOLS):
+            return "no tool support"
+        if canonical.response_schema and not model.supports(Capability.STRUCTURED_OUTPUTS):
+            return "no structured outputs"
+        headroom = total_tokens + canonical.max_tokens
+        if headroom > model.context_window:
+            return f"context {model.context_window} < required {headroom}"
+        if canonical.max_tokens > model.max_output_tokens:
+            return f"max_output {model.max_output_tokens} < requested {canonical.max_tokens}"
+        return None
+
+    # -- main entry point ---------------------------------------------------
+    async def route(
+        self,
+        canonical,
+        intent: str,
+        *,
+        cost_ceiling_tier: Tier | None = None,
+        require_available: bool = True,
+    ) -> RoutingDecision:
+        """Score the catalog and pick a model.
+
+        ``require_available=False`` scores models whose provider has no
+        credentials configured. Only ever correct for a dry run — the preview
+        endpoint uses it so the routing logic can be inspected before any key
+        is entered. The serving path must leave it True.
+        """
+        prefix_tokens, volatile_tokens = estimate_request_tokens(canonical)
+        total = prefix_tokens + volatile_tokens
+        policy = policy_for(intent)
+        effort = canonical.effort or policy.effort
+        expected_output = min(canonical.max_tokens, _EXPECTED_OUTPUT.get(effort, 1500))
+
+        # 1. Explicit pin bypasses everything, but is still recorded.
+        if canonical.pin_model:
+            model = get_model(canonical.pin_model)
+            if model is None:
+                from ..errors import NoCapableModel
+
+                raise NoCapableModel(f"unknown model '{canonical.pin_model}'")
+            cost, cache_state, plan = self._cost(
+                model, prefix_tokens, volatile_tokens, expected_output, False
+            )
+            return RoutingDecision(
+                model=model,
+                tier=model.tier,
+                effort=effort,
+                reason=f"pinned by caller (router bypassed); intent={intent}",
+                cache_state=cache_state,
+                cache_plan=plan,
+                estimated_cost_usd=cost,
+                prefix_tokens=prefix_tokens,
+                volatile_tokens=volatile_tokens,
+                pinned=True,
+                required_tier=model.tier,
+                intent=intent,
+            )
+
+        # 2. Required tier: policy floor, plus signal-based escalation.
+        required = policy.min_tier
+        reason_bits = [f"intent={intent} floor={required.name.lower()}"]
+        if policy.escalate_on_tools and canonical.tools:
+            required = max(required, Tier(min(required + 1, Tier.HEAVY)))
+            reason_bits.append("escalated (tools present)")
+
+        # 3. Caller and budget ceilings. The budget ceiling wins — it is the
+        #    degraded path and must be able to pull the floor down.
+        degraded = False
+        if caller_cap := tier_from_name(canonical.max_tier):
+            if required > caller_cap:
+                required = caller_cap
+                reason_bits.append(f"capped by caller max_tier={caller_cap.name.lower()}")
+        if cost_ceiling_tier is not None and required > cost_ceiling_tier:
+            required = cost_ceiling_tier
+            degraded = True
+            reason_bits.append(f"DEGRADED to {cost_ceiling_tier.name.lower()} by budget")
+
+        warm = await self.warm_model_for(canonical.session_id)
+
+        # 4. Build the candidate set.
+        from ..catalog import CATALOG
+
+        candidates: list[Candidate] = []
+        rejected: list[str] = []
+        excluded: list[dict] = []
+        for model in CATALOG.values():
+            if model.tier < required:
+                excluded.append(
+                    {
+                        "model": model.key,
+                        "tier": model.tier.name.lower(),
+                        "reason": "below the tier this task needs",
+                        "kind": "tier",
+                    }
+                )
+                continue
+            if reject := self._capable(model, canonical, total, require_available):
+                rejected.append(f"{model.key}: {reject}")
+                excluded.append(
+                    {
+                        "model": model.key,
+                        "tier": model.tier.name.lower(),
+                        "reason": reject,
+                        "kind": "capability",
+                    }
+                )
+                continue
+            is_warm = bool(
+                self._s.cache_aware_routing and warm is not None and warm.key == model.key
+            )
+            cost, cache_state, plan = self._cost(
+                model, prefix_tokens, volatile_tokens, expected_output, is_warm
+            )
+            candidates.append(Candidate(model, cost, cache_state, plan))
+
+        if not candidates:
+            from ..errors import NoCapableModel
+
+            raise NoCapableModel(
+                f"no model satisfies intent '{intent}' at tier "
+                f"{required.name.lower()}: {'; '.join(rejected) or 'catalog empty'}"
+            )
+
+        # 5. Escalation-only stickiness — but ONLY when there is a warm cache to
+        #    protect. The whole justification for holding a session on an
+        #    expensive model is that switching discards a cached prefix and pays
+        #    to rebuild it. If the prefix is not cacheable on that model, there
+        #    is no cache, nothing is discarded, and holding would pin every
+        #    cheap follow-up ("classify this", "translate that") to whatever
+        #    heavyweight the session happened to open with. Fall through to
+        #    price in that case.
+        warm_candidate = next(
+            (c for c in candidates if warm is not None and c.model.key == warm.key), None
+        )
+        if (
+            self._s.escalate_only
+            and warm is not None
+            and warm.tier >= required
+            and warm_candidate is not None
+            and warm_candidate.plan.cacheable
+        ):
+            chosen = warm_candidate
+            reason_bits.append(
+                f"sticky: session warm on {warm.key} (escalate-only, no de-escalation)"
+            )
+            return RoutingDecision(
+                model=chosen.model,
+                tier=chosen.model.tier,
+                effort=effort,
+                reason="; ".join(reason_bits),
+                cache_state=chosen.cache_state,
+                cache_plan=chosen.plan,
+                estimated_cost_usd=chosen.cost_usd,
+                prefix_tokens=prefix_tokens,
+                volatile_tokens=volatile_tokens,
+                considered=candidates,
+                excluded=excluded,
+                degraded=degraded,
+                sticky=True,
+                required_tier=required,
+                intent=intent,
+            )
+
+        # 6. Cheapest capable model, cache transition already priced in.
+        candidates.sort(key=lambda c: (c.cost_usd, c.model.tier))
+        chosen = candidates[0]
+
+        if warm is not None and warm.key != chosen.model.key:
+            delta = next(
+                (c.cost_usd for c in candidates if c.model.key == warm.key), None
+            )
+            if delta is not None:
+                reason_bits.append(
+                    f"switching off warm {warm.key} "
+                    f"(${delta:.5f}) to {chosen.model.key} (${chosen.cost_usd:.5f}) "
+                    f"— cache write already priced in"
+                )
+            escalated_from = warm.key
+        else:
+            escalated_from = None
+            reason_bits.append(
+                f"cheapest capable: {chosen.model.key} @ ${chosen.cost_usd:.5f} "
+                f"({chosen.cache_state})"
+            )
+
+        return RoutingDecision(
+            model=chosen.model,
+            tier=chosen.model.tier,
+            effort=effort,
+            reason="; ".join(reason_bits),
+            cache_state=chosen.cache_state,
+            cache_plan=chosen.plan,
+            estimated_cost_usd=chosen.cost_usd,
+            prefix_tokens=prefix_tokens,
+            volatile_tokens=volatile_tokens,
+            considered=candidates,
+            excluded=excluded,
+            degraded=degraded,
+            escalated_from=escalated_from,
+            required_tier=required,
+            intent=intent,
+        )
+
+
+def plan_cache_for(model: ModelSpec, prefix_tokens: int, volatile_tokens: int) -> CachePlan:
+    """Lightweight cacheability check used during scoring.
+
+    The full plan (which regions get markers) is computed once, after a model is
+    chosen — see ``cache.hints.plan_cache``. Here we only need to know whether
+    this model *would* cache this prefix at all, which is exactly the
+    ``min_cacheable_tokens`` question that varies non-monotonically across models.
+    """
+    plan = CachePlan(prefix_tokens=prefix_tokens, volatile_tokens=volatile_tokens)
+    supports = model.supports(Capability.EXPLICIT_CACHE_BREAKPOINTS) or model.supports(
+        Capability.AUTO_PREFIX_CACHE
+    )
+    plan.cacheable = supports and prefix_tokens >= model.min_cacheable_tokens
+    plan.reason = (
+        "cacheable"
+        if plan.cacheable
+        else f"prefix {prefix_tokens} < min {model.min_cacheable_tokens}"
+    )
+    return plan
+
+
+__all__ = ["Router", "RoutingDecision", "Candidate", "plan_cache", "plan_cache_for"]
