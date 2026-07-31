@@ -34,6 +34,7 @@ from .config import Settings
 from .errors import GatewayError, ProviderRefusal, UpstreamError
 from .governance import BudgetGuard, CostLedger, RateLimiter, price_usage
 from .observability import RecordSink, RequestRecord, TraceContext
+from .quality import Check, assess, judge
 from .routing import IntentClassifier, Router, explain
 from .schemas import (
     CanonicalRequest,
@@ -379,7 +380,36 @@ class GatewayPipeline:
             record.upstream_ms = summary["upstream_ms"]
             record.gateway_overhead_ms = summary["gateway_overhead_ms"]
 
+        # 11. did the routing decision actually work out? Deterministic checks
+        #     are free; the LLM grader is opt-in because it is a billable call.
+        report = assess(canonical, response, decision)
+        if self._s.quality_judge_enabled and self._registry.enabled:
+            last_user = next(
+                (m.content for m in reversed(canonical.messages) if m.role == "user"), ""
+            )
+            report.judge = await judge(
+                self._registry, self._s.quality_judge_model, str(last_user), response.text
+            )
+            if report.judge and report.judge.get("adequate") is False:
+                report.checks.append(
+                    Check(
+                        "judge_inadequate",
+                        "fail",
+                        f"Grader scored the answer {report.judge.get('score')}/5",
+                        report.judge.get("reason", ""),
+                    )
+                )
+        record.quality_verdict = report.verdict
+        record.quality_failures = [c.id for c in report.failures]
+        record.routing_ok = report.routing_ok
+        if not report.routing_ok:
+            log.info(
+                "routing miss: %s on %s produced %s",
+                intent.intent, model_used.key, record.quality_failures,
+            )
+
         latency_ms = int((time.perf_counter() - started) * 1000)
+        await stage("quality", report.summary())
         await stage(
             "served",
             {
@@ -442,6 +472,7 @@ class GatewayPipeline:
                     for c in sorted(decision.considered, key=lambda c: c.cost_usd)
                 ],
                 pilot_role=role.value,
+                quality=report.summary(),
                 trace=trace.summary() if trace else {},
                 prefix_tokens_est=decision.prefix_tokens,
                 volatile_tokens_est=decision.volatile_tokens,

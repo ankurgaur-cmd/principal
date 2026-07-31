@@ -465,3 +465,54 @@ def test_hop_trace_is_returned_on_the_normal_api_too(client):
     meta = _chat(client, "Classify this.", session="hops-3").json()["x_gateway"]
     assert meta["trace"]["hop_count"] >= 2
     assert meta["trace"]["trace_id"] == meta["trace_id"]
+
+
+def test_fleet_aggregates_across_transactions(client):
+    """A hop trace covers one request; the fleet view covers all of them."""
+    _chat(client, "Classify this ticket.", session="fleet-a")
+    _chat(client, "Review this diff for bugs.", session="fleet-b")
+    _chat(client, "Summarise this.", session="fleet-c")
+
+    f = client.get("/admin/fleet").json()
+    assert f["total_requests"] >= 3
+    assert f["by_host"], "traffic has to be attributed to a server"
+    assert f["by_model"] and f["by_intent"] and f["by_tenant"]
+    assert f["total_cost_usd"] > 0
+
+    top = f["by_host"][0]
+    assert top["requests"] >= 1
+    assert 0 < top["share"] <= 1.0
+    assert top["p50_ms"] is not None
+
+
+def test_fleet_flows_show_distinct_paths(client):
+    """The flow rows are the story: who sends what, and where it lands."""
+    _chat(client, "Classify this ticket.", session="flow-1", intent="classify")
+    _chat(client, "Design the sharding strategy.", session="flow-2", intent="architecture")
+
+    flows = client.get("/admin/fleet").json()["flows"]
+    intents = {f["intent"] for f in flows}
+    assert {"classify", "architecture"} <= intents
+
+    for row in flows:
+        assert {"tenant", "intent", "tier", "model", "host", "requests"} <= set(row)
+    # Distinct intents must not collapse into one path.
+    assert len({(f["intent"], f["model"]) for f in flows}) >= 2
+
+
+def test_fleet_counts_failures_not_just_successes(client):
+    """An availability view that only sees successes is worse than none."""
+    before = client.get("/admin/fleet").json()["total_requests"]
+    client.post(
+        "/v1/chat/completions",
+        json={"model": "no-such-model", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"x-tenant-id": "t-e2e"},
+    )
+    after = client.get("/admin/fleet").json()
+    assert after["total_requests"] == before + 1
+
+
+def test_console_is_served_uncacheable(client):
+    """A cached console silently hides new panels, which looks like a bug."""
+    res = client.get("/")
+    assert "no-store" in res.headers.get("cache-control", "")

@@ -20,6 +20,7 @@ from typing import Any
 from ..cache.hints import CachePlan
 from ..catalog import get_model
 from ..errors import UpstreamError
+from ..quality import REASONING_OUTPUT_FLOOR
 from ..schemas import CanonicalRequest, ProviderResponse, Usage
 
 log = logging.getLogger(__name__)
@@ -97,13 +98,28 @@ class OpenAIProvider:
 
         # Neutral effort -> vendor reasoning effort. The neutral vocabulary is
         # wider than this provider's, so the top two levels collapse.
-        params["reasoning_effort"] = {
+        reasoning = {
             "low": "low",
             "medium": "medium",
             "high": "high",
             "xhigh": "high",
             "max": "high",
         }.get(effort, "medium")
+
+        # Reasoning tokens are billed against the *same* output budget as the
+        # visible answer. Under a tight cap the reasoning can consume all of it
+        # and return an empty reply with finish_reason "length" — which reads as
+        # a gateway fault and is not one. Respect the caller's cap and spend
+        # less of it on reasoning, rather than silently raising their limit.
+        budget = params["max_completion_tokens"]
+        if budget < REASONING_OUTPUT_FLOOR and reasoning != "low":
+            log.info(
+                "max_tokens=%d is below the reasoning floor (%d); lowering "
+                "reasoning_effort %s -> low so the answer is not starved",
+                budget, REASONING_OUTPUT_FLOOR, reasoning,
+            )
+            reasoning = "low"
+        params["reasoning_effort"] = reasoning
 
         params.update(canonical.vendor_overrides.get("openai", {}))
         return params

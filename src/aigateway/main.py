@@ -23,7 +23,7 @@ from .auth import Authenticator
 from .config import get_settings
 from .errors import GatewayError
 from .governance import BudgetGuard, CostLedger, RateLimiter
-from .observability import RecordSink
+from .observability import FleetStats, RecordSink
 from .pipeline import GatewayPipeline
 from .providers import ProviderRegistry
 from .providers.health import HealthMonitor
@@ -80,7 +80,8 @@ def create_app() -> FastAPI:
     ledger = CostLedger(store)
     budget = BudgetGuard(settings, store, ledger)
     limiter = RateLimiter(settings, store)
-    sink = RecordSink(settings.record_path)
+    fleet = FleetStats()
+    sink = RecordSink(settings.record_path, fleet=fleet)
 
     app.state.settings = settings
     app.state.store = store
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
     app.state.budget = budget
     app.state.limiter = limiter
     app.state.sink = sink
+    app.state.fleet = fleet
     app.state.auth = Authenticator(settings)
     app.state.pipeline = GatewayPipeline(
         settings, store, registry, router_, classifier, budget, limiter, ledger, sink,
@@ -108,8 +110,16 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     async def console():
-        """Self-contained demo console. No CDN, no build step."""
-        return FileResponse(static_dir / "index.html")
+        """Self-contained demo console. No CDN, no build step.
+
+        Served with no-store: the page is edited constantly during development
+        and a cached copy silently hides new panels, which looks exactly like a
+        feature not working.
+        """
+        return FileResponse(
+            static_dir / "index.html",
+            headers={"cache-control": "no-store, must-revalidate"},
+        )
 
     @app.exception_handler(GatewayError)
     async def gateway_error_handler(request: Request, exc: GatewayError):

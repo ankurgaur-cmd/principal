@@ -47,6 +47,26 @@ async def set_limits(tenant: str, body: LimitUpdate, request: Request) -> dict:
     return await usage(tenant, request)
 
 
+@router.get("/fleet")
+async def fleet(request: Request, flow_limit: int = 25) -> dict:
+    """Where the enterprise's traffic actually goes.
+
+    A hop trace answers "what happened to this request". This answers the
+    question asked second and cared about longer: across everything we send,
+    which vendors carry the load, what do they cost, how do they behave.
+
+    Rolling in-memory window — live and cheap to poll. The JSONL record remains
+    the durable history.
+    """
+    return request.app.state.fleet.snapshot(flow_limit=flow_limit)
+
+
+@router.post("/fleet/reset")
+async def reset_fleet(request: Request) -> dict:
+    request.app.state.fleet.reset()
+    return {"reset": True}
+
+
 @router.get("/pool")
 async def pool(request: Request) -> dict:
     """Model pool: health, circuit-breaker state, and observed performance.

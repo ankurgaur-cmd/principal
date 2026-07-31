@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # How long a broken model stays out before one trial request is admitted.
     breaker_cooldown_seconds: int = 60
 
+    # -- response quality --
+    # Deterministic checks are always on and free. The LLM grader is a real
+    # billable call per request, so it is opt-in.
+    quality_judge_enabled: bool = False
+    quality_judge_model: str = "claude-haiku-4-5"
+
     # -- governance --
     default_tenant_daily_usd: float = 50.0
     default_tenant_rpm: int = 600

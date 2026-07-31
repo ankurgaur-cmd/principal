@@ -47,6 +47,9 @@ class RequestRecord:
     cache_state: str = ""
     cache_plan: str = ""
     pilot_role: str = ""
+    quality_verdict: str = ""       # pass | warn | fail
+    quality_failures: list[str] = field(default_factory=list)
+    routing_ok: bool = True
     hosts_contacted: list[str] = field(default_factory=list)
     hop_count: int = 0
     upstream_ms: int = 0
@@ -91,11 +94,19 @@ class RecordSink:
     gateway telemetry belongs.
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, fleet=None):
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Optional live aggregate. Folding here keeps a single write path, so
+        # the dashboard can never disagree with the durable record.
+        self._fleet = fleet
 
     def write(self, record: RequestRecord) -> None:
+        if self._fleet is not None:
+            try:
+                self._fleet.record(record)
+            except Exception:
+                pass  # telemetry must never fail a request
         payload = asdict(record)
         payload["estimate_error"] = round(record.estimate_error, 4)
         line = json.dumps(payload, default=str)

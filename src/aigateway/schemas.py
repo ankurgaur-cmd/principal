@@ -121,6 +121,9 @@ class GatewayMeta(BaseModel):
     # Surfaced so a routing decision can be argued with, not just observed.
     considered: list[dict[str, Any]] = Field(default_factory=list)
     pilot_role: str = ""
+    # Did the answer actually come back usable? See quality.py — a failure here
+    # is evidence the routing decision was wrong, not just a bad response.
+    quality: dict[str, Any] = Field(default_factory=dict)
     # Full hop trace: origination plus every upstream call, including the
     # attempts that failed and triggered a fallback.
     trace: dict[str, Any] = Field(default_factory=dict)

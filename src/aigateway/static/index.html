@@ -195,6 +195,25 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   padding: 4px 0; color: var(--text-secondary); }
 .excl-row b { color: var(--text-primary); font-weight: 500; min-width: 132px; }
 
+/* -- quality verdict -- */
+@media (max-width: 760px) { .reqres { grid-template-columns: 1fr !important; } }
+.verdict {
+  display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--page);
+  font-size: 13px; line-height: 1.5;
+}
+.verdict .vi { font-size: 16px; line-height: 1.2; }
+.verdict.pass { border-left: 3px solid var(--good); }
+.verdict.warn { border-left: 3px solid var(--warning); }
+.verdict.fail { border-left: 3px solid var(--critical); }
+.checks { margin-top: 10px; }
+.check { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0;
+  font-size: 12.5px; border-top: 1px solid var(--grid); }
+.check:first-child { border-top: none; }
+.check .ci { flex: none; width: 14px; text-align: center; }
+.check b { font-weight: 600; }
+.check span { color: var(--text-secondary); }
+
 /* -- hop waterfall -- */
 .hops { margin-top: 12px; }
 .hop {
@@ -315,6 +334,51 @@ details summary { cursor: pointer; font-size: 12px; color: var(--text-secondary)
 
   <!-- ============ left: composer ============ -->
   <div>
+    <details class="card" id="guide">
+      <summary style="cursor:pointer;font-size:13px;text-transform:uppercase;
+                      letter-spacing:.07em;color:var(--text-muted);font-weight:600">
+        How this works — and what you need to provide</summary>
+      <div style="margin-top:14px;font-size:13px;line-height:1.6;color:var(--text-secondary)">
+        <p style="margin:0 0 12px"><b style="color:var(--text-primary)">The flow.</b>
+        Your agent sends an ordinary OpenAI-shaped request with
+        <code>model: "auto"</code>. The gateway classifies what the request is
+        <i>for</i>, works out the smallest model tier that can do it, prices
+        every qualifying model <i>for this specific request</i> — including what
+        the prompt cache would cost or save on each — and sends it to the
+        cheapest one. It records every hop on the way.</p>
+
+        <table style="margin:12px 0">
+          <thead><tr><th>You provide</th><th>Why it matters</th></tr></thead>
+          <tbody>
+            <tr><td><b>API key</b><br><small>required</small></td>
+                <td>At least one vendor key, in the panel below. Nothing can be
+                    served without it — routing still works, calls do not.</td></tr>
+            <tr><td><b>session_id</b><br><small>strongly advised</small></td>
+                <td>Groups the turns of one workflow. This is what lets the
+                    gateway keep a prompt cache warm; without it every request
+                    is a cold start and you lose most of the saving.</td></tr>
+            <tr><td><b>Shared context</b><br><small>optional</small></td>
+                <td>The stable part of your prompt — system instructions, tool
+                    definitions, retrieved documents. The bigger and more stable
+                    it is, the more caching is worth.</td></tr>
+            <tr><td><b>intent</b><br><small>optional</small></td>
+                <td>If your agent already knows the task type, saying so skips
+                    classification entirely. Cheapest possible path.</td></tr>
+            <tr><td><b>Budget / RPM</b><br><small>optional</small></td>
+                <td>Per-tenant caps. Over budget, the router degrades to a
+                    cheaper tier and says so, rather than cutting you off.</td></tr>
+          </tbody>
+        </table>
+
+        <p style="margin:0"><b style="color:var(--text-primary)">Reading the dashboard.</b>
+        <b>Pipeline</b> shows one request moving through the gateway.
+        <b>Why this model</b> explains that choice in plain English.
+        <b>Fleet</b> aggregates every request to show where your traffic and
+        spend actually go. <b>Transaction trace</b> lists every server this one
+        request touched. <b>Model pool</b> is the live health of each model.</p>
+      </div>
+    </details>
+
     <div class="card" id="credCard">
       <h2>API keys</h2>
       <div id="credStatus"></div>
@@ -504,6 +568,33 @@ details summary { cursor: pointer; font-size: 12px; color: var(--text-secondary)
     </div>
 
     <div class="card">
+      <h2>Fleet — where your traffic goes</h2>
+      <div id="fleetSummary" class="hint">No traffic yet this session.</div>
+
+      <h3 style="margin:16px 0 8px;font-size:12px;text-transform:uppercase;
+                 letter-spacing:.06em;color:var(--text-muted);font-weight:500">
+        By server</h3>
+      <div id="fleetHosts" class="bars"></div>
+
+      <h3 style="margin:18px 0 8px;font-size:12px;text-transform:uppercase;
+                 letter-spacing:.06em;color:var(--text-muted);font-weight:500">
+        Flows — who sends what, where</h3>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>Tenant</th><th>Intent</th><th>Tier</th><th>Model</th><th>Server</th>
+          <th class="num">Reqs</th><th class="num">Share</th>
+        </tr></thead>
+        <tbody id="fleetFlows"><tr><td colspan="7" style="color:var(--text-muted)">
+          Send a few different queries to build up the picture.</td></tr></tbody>
+      </table></div>
+      <div class="hint">
+        Each row is a distinct path through the gateway. This is the view that
+        shows, for example, that one agent's summarisation traffic is what is
+        actually driving your frontier-model spend.
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Transaction trace — every hop</h2>
       <div id="traceSummary" class="hint">Send a query to see every server this request touched.</div>
       <div id="hops" class="hops"></div>
@@ -545,14 +636,29 @@ details summary { cursor: pointer; font-size: 12px; color: var(--text-secondary)
     </div>
 
     <div class="card">
-      <h2>Response</h2>
-      <div class="tiles" style="margin-bottom:12px">
+      <h2>Request &amp; response</h2>
+      <div id="qualityVerdict"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:12px 0"
+           class="reqres">
+        <div>
+          <div class="wt" style="margin-bottom:5px">Sent to the model</div>
+          <div class="answer" id="sentPreview" style="max-height:220px">—</div>
+        </div>
+        <div>
+          <div class="wt" style="margin-bottom:5px">Came back</div>
+          <div class="answer" id="answer" style="max-height:220px">—</div>
+        </div>
+      </div>
+
+      <div id="qualityChecks"></div>
+
+      <div class="tiles" style="margin-top:12px">
         <div class="tile"><div class="k">Cost</div><div class="v" id="mCost">—</div></div>
         <div class="tile"><div class="k">Latency</div><div class="v" id="mLat">—</div></div>
         <div class="tile"><div class="k">Prompt tok</div><div class="v" id="mIn">—</div></div>
         <div class="tile"><div class="k">Cached tok</div><div class="v" id="mCached">—</div></div>
       </div>
-      <div class="answer" id="answer">—</div>
     </div>
 
     <div class="card">
@@ -677,9 +783,10 @@ async function boot() {
   await refreshHealth();
   await refreshCreds();
   await refreshPool();
+  await refreshFleet();
   // Keep the pool live while idle so a probe result or a breaker opening is
   // visible without sending a request.
-  setInterval(() => refreshPool(lastChosen), 15000);
+  setInterval(() => { refreshPool(lastChosen); refreshFleet(); }, 15000);
 
   try {
     const p = await (await fetch("/admin/policy")).json();
@@ -839,6 +946,14 @@ $("sendBtn").onclick = async () => {
 
   markActive("s1");
 
+  // Show what we're actually sending, so request and response sit side by side.
+  $("sentPreview").textContent =
+    ($("context").value.trim() ? `[system]\n${$("context").value}\n\n` : "") +
+    `[user]\n${$("prompt").value}`;
+  $("answer").textContent = "…";
+  $("qualityVerdict").innerHTML = "";
+  $("qualityChecks").innerHTML = "";
+
   try {
     // Streamed so each stage renders as it actually completes — the timings
     // shown are measured, not animated.
@@ -859,6 +974,7 @@ $("sendBtn").onclick = async () => {
   } finally {
     btn.disabled = false; btn.textContent = "Send";
     refreshPool(lastChosen);
+    refreshFleet();
   }
 };
 
@@ -895,6 +1011,82 @@ async function consumeTrace(res) {
       if (pace && !["accepted", "budget", "done"].includes(ev.stage)) await sleep(pace);
     }
   }
+}
+
+/* ---------- quality: did the routing decision work out? ---------- */
+const VERDICT = {
+  pass: { icon: "✓", text: "Routing looks sound — the answer came back usable." },
+  warn: { icon: "!", text: "Answer usable, but something is worth checking." },
+  fail: { icon: "✗", text: "The answer is not usable. This is evidence the routing was wrong." },
+};
+const CHECK_ICON = { pass: "✓", warn: "!", fail: "✗" };
+
+function renderQuality(q) {
+  const v = VERDICT[q.verdict] || VERDICT.warn;
+  $("qualityVerdict").innerHTML = `
+    <div class="verdict ${q.verdict}">
+      <span class="vi">${v.icon}</span>
+      <div><b>${v.text}</b>${q.judge
+        ? `<br><span style="color:var(--text-secondary)">Grader: ${q.judge.score}/5 — ${q.judge.reason}</span>`
+        : ""}</div>
+    </div>`;
+
+  $("qualityChecks").innerHTML = q.checks.length ? `
+    <div class="checks">
+      ${q.checks.map(c => `
+        <div class="check">
+          <span class="ci" style="color:var(--${c.level === "fail" ? "critical"
+            : c.level === "warn" ? "warning" : "success-text"})">${CHECK_ICON[c.level]}</span>
+          <div><b>${c.title}</b>${c.detail ? `<br><span>${c.detail}</span>` : ""}</div>
+        </div>`).join("")}
+    </div>` : "";
+}
+
+/* ---------- fleet: aggregate across all traffic ---------- */
+async function refreshFleet() {
+  try {
+    const f = await (await fetch("/admin/fleet")).json();
+    if (!f.total_requests) return;
+
+    // Warnings carry an icon + label, never colour alone.
+    const warn = (f.warnings || []).map(w => `
+      <div class="reason ${w.level === "serious" ? "err" : ""}"
+           style="margin-bottom:8px;border-left-color:var(--${w.level === "serious" ? "critical" : "warning"})">
+        <b>⚠ ${w.title}</b><br>${w.detail}
+      </div>`).join("");
+
+    $("fleetSummary").innerHTML = warn +
+      `<b>${f.total_requests}</b> request(s) this session · ` +
+      `${money(f.total_cost_usd)} total · ` +
+      `${f.by_host.length} server(s) · ${f.by_model.length} model(s)`;
+
+    // One series (share of traffic); rows are ranked, so a bar length is the
+    // whole encoding — no colour needed to distinguish them.
+    const max = Math.max(...f.by_host.map(h => h.requests), 1);
+    $("fleetHosts").innerHTML = f.by_host.map(h => `
+      <div class="bar-row" style="grid-template-columns:190px 1fr 190px">
+        <div class="bar-name"><span title="${h.key}">${h.key}</span></div>
+        <div class="bar-track">
+          <div class="bar-fill chosen" style="width:${h.requests / max * 100}%"></div>
+        </div>
+        <div class="bar-label">
+          ${h.requests} req · ${h.p50_ms != null ? h.p50_ms + "ms p50" : "—"}
+          ${h.error_rate ? ` · <span style="color:var(--critical)">${(h.error_rate*100).toFixed(0)}% err</span>` : ""}
+          · ${money(h.cost_usd)}
+        </div>
+      </div>`).join("");
+
+    $("fleetFlows").innerHTML = f.flows.length ? f.flows.map(fl => `
+      <tr>
+        <td>${fl.tenant}</td><td>${fl.intent}</td>
+        <td><span class="tier-swatch ${TIERS[fl.tier] || ""}" style="display:inline-block"></span> ${fl.tier}</td>
+        <td>${fl.model}</td>
+        <td style="font-family:var(--mono);font-size:11px">${fl.host}</td>
+        <td class="num">${fl.requests}</td>
+        <td class="num">${(fl.share * 100).toFixed(0)}%</td>
+      </tr>`).join("")
+      : '<tr><td colspan="7" style="color:var(--text-muted)">No flows yet.</td></tr>';
+  } catch { /* fleet is a view, never a blocker */ }
 }
 
 /* ---------- hop waterfall ---------- */
@@ -1042,6 +1234,10 @@ function handleStage(ev) {
              (ev.fallback_chain.length ? `<br>fallback: ${ev.fallback_chain.join(" → ")}` : ""),
         ms: ev.elapsed_ms,
       });
+      break;
+
+    case "quality":
+      renderQuality(ev);
       break;
 
     case "hops":
