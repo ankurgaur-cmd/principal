@@ -27,6 +27,7 @@ from .observability import FleetStats, RecordSink
 from .pipeline import GatewayPipeline
 from .providers import ProviderRegistry
 from .providers.health import HealthMonitor
+from .providers.switchboard import Switchboard
 from .routing import IntentClassifier, Router
 from .state import build_store
 
@@ -69,7 +70,8 @@ def create_app() -> FastAPI:
     )
     # The registry is passed live, not snapshotted — credentials can be added
     # at runtime via the console, and routing must pick that up immediately.
-    router_ = Router(settings, store, registry, health=health)
+    switchboard = Switchboard()
+    router_ = Router(settings, store, registry, health=health, switchboard=switchboard)
     classifier = IntentClassifier(
         store,
         registry,
@@ -87,6 +89,7 @@ def create_app() -> FastAPI:
     app.state.store = store
     app.state.registry = registry
     app.state.health = health
+    app.state.switchboard = switchboard
     app.state.router = router_
     app.state.classifier = classifier
     app.state.ledger = ledger
@@ -140,6 +143,22 @@ def create_app() -> FastAPI:
             "escalate_only": settings.escalate_only,
             "budget_mode": settings.budget_mode,
         }
+
+    from .catalog import stale_prices, unverified_prices
+
+    if placeholders := unverified_prices():
+        log.warning(
+            "placeholder pricing on %s — the router selects on price, so these "
+            "decide which vendor gets traffic. Verify before trusting the ledger.",
+            ", ".join(placeholders),
+        )
+    for lapsed in stale_prices():
+        log.warning(
+            "%s promotional pricing expired on %s: catalog says %s, actual is %s. "
+            "Routing is being decided by a stale rate.",
+            lapsed["model"], lapsed["expired_on"],
+            lapsed["catalog_price"], lapsed["actual_price"],
+        )
 
     if not settings.redis_url:
         log.warning(

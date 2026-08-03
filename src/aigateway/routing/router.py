@@ -72,7 +72,7 @@ class RoutingDecision:
 
 
 class Router:
-    def __init__(self, settings: Settings, store, providers, health=None):
+    def __init__(self, settings: Settings, store, providers, health=None, switchboard=None):
         """``providers`` is a live source of enabled provider names.
 
         Accepts either a plain set (tests, fixed deployments) or anything with
@@ -87,6 +87,9 @@ class Router:
         # Optional: when present, models whose circuit breaker is open are not
         # candidates. Health is a routing input, not an error path.
         self._health = health
+        # Optional: operator on/off switches. Checked before health, because an
+        # operator's decision outranks an observation.
+        self._switchboard = switchboard
 
     @property
     def _providers(self) -> set[str]:
@@ -142,12 +145,22 @@ class Router:
                 + volatile_tokens * price_in
             )
 
-        return input_cost + expected_output * price_out, cache_state, plan
+        raw = input_cost + expected_output * price_out
+        # Vendor preference is a deliberate thumb on the scale, not a price.
+        # It is applied to the *score*, never to the ledger — what you are
+        # billed stays the real number.
+        weight = self._s.vendor_weights.get(model.provider, 1.0)
+        return raw * weight, cache_state, plan
 
     def _capable(
         self, model: ModelSpec, canonical, total_tokens: int, require_available: bool = True
     ) -> str | None:
         """Return a rejection reason, or None if the model can serve this."""
+        if self._switchboard:
+            # Checked even on a dry run: a preview that ignores your switches
+            # would not be previewing the routing you actually configured.
+            if off := self._switchboard.reason(model.key, model.provider):
+                return off
         if require_available and model.provider not in self._providers:
             return "provider not configured"
         if require_available and self._health and not self._health.is_available(model.key):

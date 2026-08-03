@@ -601,7 +601,8 @@ details summary { cursor: pointer; font-size: 12px; color: var(--text-secondary)
     </div>
 
     <div class="card">
-      <h2>Model pool — health &amp; availability</h2>
+      <h2>Model pool — click to switch on/off</h2>
+      <div id="vendorSwitches" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"></div>
       <div class="pool" id="pool"><div class="hint">Loading pool…</div></div>
       <div class="legend">
         <span><i class="hstat h-healthy" style="border-radius:50%"></i>healthy</span>
@@ -611,13 +612,18 @@ details summary { cursor: pointer; font-size: 12px; color: var(--text-secondary)
         <span style="margin-left:auto">
           <button id="probeBtn" style="padding:3px 9px;font-size:12px">Probe now</button>
           <button id="breakerBtn" style="padding:3px 9px;font-size:12px">Reset breakers</button>
+          <button id="switchResetBtn" style="padding:3px 9px;font-size:12px">Switch all on</button>
         </span>
       </div>
       <div class="hint">
-        Health has two sources: periodic free probes, and the outcome of real
-        traffic. The second drives the circuit breaker — after
+        <b>Click any model to switch it off</b>, or use the vendor buttons above
+        to disable a whole vendor — then send a query and watch where the
+        traffic goes instead. Switched-off models are excluded from routing and
+        appear under "Ruled out" in the explanation.<br><br>
+        Health is separate and automatic: periodic free probes plus the outcome
+        of real traffic. The second drives the circuit breaker — after
         <b id="thresholdN">3</b> consecutive failures a model leaves the
-        rotation, and the router stops considering it entirely.
+        rotation on its own. An operator switch never heals; a breaker does.
       </div>
     </div>
 
@@ -861,29 +867,70 @@ function setLamps(source) {
 /* ---------- model pool ---------- */
 let poolCache = [];
 
+let switchCache = { models: [], providers: [] };
+
 async function refreshPool(chosen) {
   try {
-    const d = await (await fetch("/admin/pool")).json();
+    const [d, s] = await Promise.all([
+      (await fetch("/admin/pool")).json(),
+      (await fetch("/admin/switchboard")).json(),
+    ]);
     poolCache = d.models;
+    switchCache = s;
     $("thresholdN").textContent = d.breaker_failure_threshold;
+    renderVendorSwitches();
     renderPool(chosen);
   } catch { $("pool").innerHTML = '<div class="hint">Could not read pool status.</div>'; }
 }
 
+function renderVendorSwitches() {
+  $("vendorSwitches").innerHTML = switchCache.providers.map(p => `
+    <button data-provider="${p.provider}" data-enabled="${p.enabled}"
+            style="padding:5px 12px;font-size:12.5px;font-weight:500;
+                   ${p.enabled ? "" : "opacity:.55;text-decoration:line-through"}">
+      ${p.enabled ? "◉" : "○"} ${p.provider}
+    </button>`).join("");
+
+  $("vendorSwitches").querySelectorAll("[data-provider]").forEach(b => {
+    b.onclick = async () => {
+      b.disabled = true;
+      await fetch("/admin/switchboard/provider/" + b.dataset.provider, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: b.dataset.enabled !== "true" }),
+      });
+      await refreshPool(lastChosen);
+    };
+  });
+}
+
 function renderPool(chosen) {
+  const sw = Object.fromEntries(switchCache.models.map(m => [m.model, m]));
+
   $("pool").innerHTML = poolCache.map(m => {
-    const out = m.status === "unhealthy" || m.status === "unconfigured";
+    const s = sw[m.model] || { enabled: true, disabled_by_provider: false };
+    const off = !s.enabled;
+    const out = off || m.status === "unhealthy" || m.status === "unconfigured";
     const lat = m.p50_latency_ms != null ? `${m.p50_latency_ms}ms p50` : "no traffic yet";
     const rate = m.success_rate != null ? ` · ${(m.success_rate * 100).toFixed(0)}% ok` : "";
+    // Off-by-vendor is shown but not individually clickable — toggling the
+    // model would be a no-op while its vendor is off, which is a confusing
+    // control to offer.
+    const label = off
+      ? (s.disabled_by_provider ? "switched off with its vendor" : "switched off")
+      : m.status;
     return `
-      <div class="pmodel ${m.model === chosen ? "chosen" : ""} ${out ? "out" : ""}">
+      <div class="pmodel ${m.model === chosen ? "chosen" : ""} ${out ? "out" : ""}"
+           data-model="${m.model}"
+           ${s.disabled_by_provider ? "" : 'style="cursor:pointer"'}
+           title="${s.disabled_by_provider ? "Enable the vendor first" : "Click to switch " + (off ? "on" : "off")}">
         <span class="pm-tag">${m.tier}</span>
         <div class="pm-top">
-          <span class="hstat h-${m.status}" title="${m.status}"></span>
-          <span class="pm-name" title="${m.model}">${m.model}</span>
+          <span class="hstat h-${off ? "unconfigured" : m.status}"></span>
+          <span class="pm-name" title="${m.model}"
+                style="${off ? "text-decoration:line-through" : ""}">${m.model}</span>
         </div>
         <div class="pm-meta">
-          ${m.status}${m.breaker !== "closed" ? ` · breaker ${m.breaker}` : ""}<br>
+          ${label}${m.breaker !== "closed" && !off ? ` · breaker ${m.breaker}` : ""}<br>
           ${lat}${rate}<br>
           $${m.price_in_per_mtok}/$${m.price_out_per_mtok} per Mtok ·
           cache min ${m.min_cacheable_tokens.toLocaleString()}
@@ -891,7 +938,24 @@ function renderPool(chosen) {
         </div>
       </div>`;
   }).join("");
+
+  $("pool").querySelectorAll("[data-model]").forEach(card => {
+    const s = sw[card.dataset.model];
+    if (s?.disabled_by_provider) return;   // vendor switch owns this one
+    card.onclick = async () => {
+      await fetch("/admin/switchboard/model/" + card.dataset.model, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: !s.enabled }),
+      });
+      await refreshPool(lastChosen);
+    };
+  });
 }
+
+$("switchResetBtn").onclick = async () => {
+  await fetch("/admin/switchboard/reset", { method: "POST" });
+  await refreshPool(lastChosen);
+};
 
 $("probeBtn").onclick = async () => {
   await fetch("/admin/pool/probe", { method: "POST" });

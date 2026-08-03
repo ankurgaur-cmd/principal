@@ -67,6 +67,36 @@ async def reset_fleet(request: Request) -> dict:
     return {"reset": True}
 
 
+class SwitchUpdate(BaseModel):
+    enabled: bool
+
+
+@router.get("/switchboard")
+async def switchboard(request: Request) -> dict:
+    """Which models and vendors are switched on."""
+    return request.app.state.switchboard.state()
+
+
+@router.post("/switchboard/model/{model_key}")
+async def switch_model(model_key: str, body: SwitchUpdate, request: Request) -> dict:
+    """Turn one model on or off. Takes effect on the next request."""
+    request.app.state.switchboard.set_model(model_key, body.enabled)
+    return request.app.state.switchboard.state()
+
+
+@router.post("/switchboard/provider/{provider}")
+async def switch_provider(provider: str, body: SwitchUpdate, request: Request) -> dict:
+    """Turn a whole vendor on or off — the fastest way to test failover."""
+    request.app.state.switchboard.set_provider(provider.lower(), body.enabled)
+    return request.app.state.switchboard.state()
+
+
+@router.post("/switchboard/reset")
+async def switch_reset(request: Request) -> dict:
+    request.app.state.switchboard.reset()
+    return request.app.state.switchboard.state()
+
+
 @router.get("/pool")
 async def pool(request: Request) -> dict:
     """Model pool: health, circuit-breaker state, and observed performance.

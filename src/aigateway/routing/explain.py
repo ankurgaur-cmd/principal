@@ -82,6 +82,7 @@ EXCLUSION_PLAIN = {
     "below the tier this task needs": "not capable enough for this task",
     "provider not configured": "no API key for this provider",
     "circuit open (unhealthy)": "taken out of rotation — it has been failing",
+    "switched off by an operator": "switched off by you",
     "no tool support": "cannot use tools, and this request needs them",
     "no structured outputs": "cannot guarantee the JSON shape this request asks for",
 }
@@ -90,6 +91,8 @@ EXCLUSION_PLAIN = {
 def _humanise_exclusion(reason: str) -> str:
     if reason in EXCLUSION_PLAIN:
         return EXCLUSION_PLAIN[reason]
+    if reason.startswith("vendor '") and "switched off" in reason:
+        return reason.replace("switched off by an operator", "switched off by you")
     if reason.startswith("context "):
         return "context window too small for this prompt"
     if reason.startswith("max_output "):

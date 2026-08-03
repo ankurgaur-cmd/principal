@@ -61,6 +61,17 @@ class Settings(BaseSettings):
     # How long a broken model stays out before one trial request is admitted.
     breaker_cooldown_seconds: int = 60
 
+    # -- vendor preference --
+    # Score multiplier per provider, applied to the estimated cost. 1.0 is
+    # neutral (pure price). Below 1.0 favours a vendor, above 1.0 penalises it.
+    #
+    # This exists because routing on sticker price alone will always concentrate
+    # traffic on whoever is cheapest per token, and that is not always the right
+    # business decision — you may have a committed-spend agreement, a data
+    # -residency constraint, or a quality preference that price cannot express.
+    # Example: GATEWAY_VENDOR_WEIGHTS='{"anthropic": 0.6, "openai": 1.0}'
+    vendor_weights: dict[str, float] = {}
+
     # -- response quality --
     # Deterministic checks are always on and free. The LLM grader is a real
     # billable call per request, so it is opt-in.

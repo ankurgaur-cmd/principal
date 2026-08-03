@@ -12,9 +12,14 @@ matter more than they look:
   gateway strips them rather than surfacing a vendor error to an agent that
   did nothing wrong.
 
-Anthropic figures are first-party API rates. **OpenAI entries are
-config-driven placeholders** — verify ids and prices against OpenAI's current
-pricing page before you trust the cost ledger for chargeback.
+All prices were verified on 2026-07-31 against each vendor's published pricing
+page (see ``price_source`` / ``price_checked`` on each entry). Model IDs were
+confirmed against the live ``/v1/models`` endpoint for the configured accounts.
+
+Re-verify periodically. The router selects on price, so a stale rate does not
+produce a small billing error — it re-routes whole tiers. ``stale_prices()``
+catches promotional rates that have lapsed; nothing catches a silent list-price
+change except checking.
 """
 
 from __future__ import annotations
@@ -75,6 +80,13 @@ class ModelSpec:
     # model, so a wrong price does not cause a small billing error — it
     # silently sends *all* traffic in that tier to the wrong vendor.
     price_verified: bool = True
+    price_source: str = ""
+    price_checked: str = ""  # ISO date the rate was last confirmed
+    # Promotional rates expire. A dated price that lapses silently is the same
+    # failure mode as a placeholder, just delayed — so record the date and warn.
+    price_expires: str | None = None
+    price_after_expiry: tuple[float, float] | None = None
+    price_note: str = ""
 
     def supports(self, cap: str) -> bool:
         return cap in self.capabilities
@@ -103,8 +115,15 @@ _OPENAI_CAPS = frozenset(
 )
 
 
+ANTHROPIC_PRICING = "https://platform.claude.com/docs/en/about-claude/pricing"
+OPENAI_PRICING = "https://developers.openai.com/api/docs/pricing"
+CHECKED = "2026-07-31"
+
+
 CATALOG: dict[str, ModelSpec] = {
-    # ---------------- Anthropic ----------------
+    # ================= Anthropic =================
+    # Verified 2026-07-31 against https://platform.claude.com/docs/en/about-claude/pricing
+    # Cache multipliers are published as exact rates and match 1.25x / 2x / 0.1x.
     "claude-haiku-4-5": ModelSpec(
         key="claude-haiku-4-5",
         provider="anthropic",
@@ -114,19 +133,24 @@ CATALOG: dict[str, ModelSpec] = {
         price_out_per_mtok=5.00,
         context_window=200_000,
         max_output_tokens=64_000,
-        min_cacheable_tokens=4096,  # note: highest minimum of the three
+        min_cacheable_tokens=4096,  # highest minimum of the three — not monotonic
         capabilities=_ANTHROPIC_CAPS - {Capability.EXTENDED_THINKING},
         supports_sampling_params=True,
         rate_limit_pool="anthropic-haiku",
+        price_source=ANTHROPIC_PRICING,
+        price_checked=CHECKED,
     ),
     "claude-sonnet-5": ModelSpec(
         key="claude-sonnet-5",
         provider="anthropic",
         vendor_model_id="claude-sonnet-5",
         tier=Tier.STANDARD,
-        # $3/$15 list; introductory $2/$10 runs through 2026-08-31.
-        price_in_per_mtok=3.00,
-        price_out_per_mtok=15.00,
+        # Introductory rate, in effect through 2026-08-31. Standard is $3/$15.
+        price_in_per_mtok=2.00,
+        price_out_per_mtok=10.00,
+        price_expires="2026-08-31",
+        price_after_expiry=(3.00, 15.00),
+        price_note="introductory pricing; reverts to $3/$15 on 2026-09-01",
         context_window=1_000_000,
         max_output_tokens=128_000,
         min_cacheable_tokens=1024,
@@ -134,6 +158,8 @@ CATALOG: dict[str, ModelSpec] = {
         supports_sampling_params=False,  # non-default values are a 400
         thinking_default_on=True,
         rate_limit_pool="anthropic-sonnet-5",
+        price_source=ANTHROPIC_PRICING,
+        price_checked=CHECKED,
     ),
     "claude-opus-5": ModelSpec(
         key="claude-opus-5",
@@ -149,10 +175,18 @@ CATALOG: dict[str, ModelSpec] = {
         supports_sampling_params=False,
         thinking_default_on=True,
         thinking_disable_max_effort="high",  # disabling above `high` is a 400
-        # Does NOT draw from the combined Opus 4.x pool.
-        rate_limit_pool="anthropic-opus-5",
+        rate_limit_pool="anthropic-opus-5",  # separate pool from Opus 4.x
+        price_source=ANTHROPIC_PRICING,
+        price_checked=CHECKED,
     ),
-    # ---------------- OpenAI (verify ids + pricing) ----------------
+
+    # ================= OpenAI =================
+    # Verified 2026-07-31 against https://developers.openai.com/api/docs/pricing
+    # OpenAI caches prefixes automatically: cached input is 0.1x and there is
+    # no separate write premium, so the write multiplier is 1.0 rather than
+    # Anthropic's 1.25x. That asymmetry is real and the router prices it.
+    # NOTE: prices are verified; context windows below are not — the published
+    # model page did not list these versions. They are conservative.
     "gpt-5-nano": ModelSpec(
         key="gpt-5-nano",
         provider="openai",
@@ -160,15 +194,32 @@ CATALOG: dict[str, ModelSpec] = {
         tier=Tier.LIGHT,
         price_in_per_mtok=0.05,
         price_out_per_mtok=0.40,
-        context_window=400_000,
+        context_window=272_000,
         max_output_tokens=128_000,
-        cache_read_multiplier=0.1,
-        cache_write_multiplier_5m=1.0,  # automatic caching: no write premium
+        cache_write_multiplier_5m=1.0,
         cache_write_multiplier_1h=1.0,
         min_cacheable_tokens=1024,
         capabilities=_OPENAI_CAPS,
         rate_limit_pool="openai-nano",
-        price_verified=False,
+        price_source=OPENAI_PRICING,
+        price_checked=CHECKED,
+    ),
+    "gpt-5.4-nano": ModelSpec(
+        key="gpt-5.4-nano",
+        provider="openai",
+        vendor_model_id="gpt-5.4-nano",
+        tier=Tier.LIGHT,
+        price_in_per_mtok=0.20,
+        price_out_per_mtok=1.25,
+        context_window=272_000,
+        max_output_tokens=128_000,
+        cache_write_multiplier_5m=1.0,
+        cache_write_multiplier_1h=1.0,
+        min_cacheable_tokens=1024,
+        capabilities=_OPENAI_CAPS,
+        rate_limit_pool="openai-nano",
+        price_source=OPENAI_PRICING,
+        price_checked=CHECKED,
     ),
     "gpt-5-mini": ModelSpec(
         key="gpt-5-mini",
@@ -177,14 +228,32 @@ CATALOG: dict[str, ModelSpec] = {
         tier=Tier.STANDARD,
         price_in_per_mtok=0.25,
         price_out_per_mtok=2.00,
-        context_window=400_000,
+        context_window=272_000,
         max_output_tokens=128_000,
         cache_write_multiplier_5m=1.0,
         cache_write_multiplier_1h=1.0,
         min_cacheable_tokens=1024,
         capabilities=_OPENAI_CAPS,
         rate_limit_pool="openai-mini",
-        price_verified=False,
+        price_source=OPENAI_PRICING,
+        price_checked=CHECKED,
+    ),
+    "gpt-5.4-mini": ModelSpec(
+        key="gpt-5.4-mini",
+        provider="openai",
+        vendor_model_id="gpt-5.4-mini",
+        tier=Tier.STANDARD,
+        price_in_per_mtok=0.75,
+        price_out_per_mtok=4.50,
+        context_window=272_000,
+        max_output_tokens=128_000,
+        cache_write_multiplier_5m=1.0,
+        cache_write_multiplier_1h=1.0,
+        min_cacheable_tokens=1024,
+        capabilities=_OPENAI_CAPS,
+        rate_limit_pool="openai-mini",
+        price_source=OPENAI_PRICING,
+        price_checked=CHECKED,
     ),
     "gpt-5": ModelSpec(
         key="gpt-5",
@@ -193,14 +262,32 @@ CATALOG: dict[str, ModelSpec] = {
         tier=Tier.HEAVY,
         price_in_per_mtok=1.25,
         price_out_per_mtok=10.00,
-        context_window=400_000,
+        context_window=272_000,
         max_output_tokens=128_000,
         cache_write_multiplier_5m=1.0,
         cache_write_multiplier_1h=1.0,
         min_cacheable_tokens=1024,
         capabilities=_OPENAI_CAPS,
         rate_limit_pool="openai-flagship",
-        price_verified=False,
+        price_source=OPENAI_PRICING,
+        price_checked=CHECKED,
+    ),
+    "gpt-5.4": ModelSpec(
+        key="gpt-5.4",
+        provider="openai",
+        vendor_model_id="gpt-5.4",
+        tier=Tier.HEAVY,
+        price_in_per_mtok=2.50,
+        price_out_per_mtok=15.00,
+        context_window=272_000,
+        max_output_tokens=128_000,
+        cache_write_multiplier_5m=1.0,
+        cache_write_multiplier_1h=1.0,
+        min_cacheable_tokens=1024,
+        capabilities=_OPENAI_CAPS,
+        rate_limit_pool="openai-flagship",
+        price_source=OPENAI_PRICING,
+        price_checked=CHECKED,
     ),
 }
 
@@ -218,10 +305,28 @@ def available_models(enabled_providers: set[str]) -> list[ModelSpec]:
 
 
 def unverified_prices() -> list[str]:
-    """Models whose price is a placeholder.
-
-    Worth surfacing loudly: the router selects on price, so an unverified rate
-    does not produce a rounding error in the ledger — it can route an entire
-    tier to the wrong vendor and look deliberate while doing it.
-    """
+    """Models whose price is a placeholder rather than a confirmed rate."""
     return [m.key for m in CATALOG.values() if not m.price_verified]
+
+
+def stale_prices(today: str | None = None) -> list[dict]:
+    """Models whose promotional rate has lapsed.
+
+    The router selects on price, so a rate that quietly expires re-routes
+    traffic without anyone changing a line of code. Checked at startup.
+    """
+    import datetime
+
+    now = today or datetime.date.today().isoformat()
+    out = []
+    for m in CATALOG.values():
+        if m.price_expires and now > m.price_expires:
+            out.append(
+                {
+                    "model": m.key,
+                    "expired_on": m.price_expires,
+                    "catalog_price": (m.price_in_per_mtok, m.price_out_per_mtok),
+                    "actual_price": m.price_after_expiry,
+                }
+            )
+    return out

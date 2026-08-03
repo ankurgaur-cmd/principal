@@ -322,7 +322,7 @@ def test_trace_reports_errors_as_a_stage(client):
 
 def test_pool_endpoint_reports_every_model(client):
     d = client.get("/admin/pool").json()
-    assert len(d["models"]) == 6
+    assert len(d["models"]) == len(__import__("aigateway.catalog", fromlist=["CATALOG"]).CATALOG)
     assert {"model", "status", "breaker", "p50_latency_ms"} <= set(d["models"][0])
     assert d["breaker_failure_threshold"] >= 1
 
