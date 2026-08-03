@@ -72,6 +72,22 @@ class Settings(BaseSettings):
     # Example: GATEWAY_VENDOR_WEIGHTS='{"anthropic": 0.6, "openai": 1.0}'
     vendor_weights: dict[str, float] = {}
 
+    # -- quality-adjusted routing --
+    # Feed observed response quality back into model selection. A model that
+    # keeps failing a given intent becomes more expensive to choose.
+    quality_routing_enabled: bool = True
+    # Observations of one (model, intent) pair to keep. Old failures age out.
+    quality_window: int = 50
+    # Below this many observations the multiplier is exactly 1.0 — penalising
+    # on one bad response would be superstition.
+    quality_min_samples: int = 5
+    # Ceiling on the penalty, so a bad patch cannot exile a model forever.
+    quality_max_penalty: float = 4.0
+    # Fraction of requests that ignore reputation entirely. Without this a
+    # penalised model never gets traffic, so it can never recover — the
+    # feedback loop becomes a ratchet.
+    quality_exploration_rate: float = 0.05
+
     # -- response quality --
     # Deterministic checks are always on and free. The LLM grader is a real
     # billable call per request, so it is opt-in.

@@ -41,10 +41,16 @@ _EXPECTED_OUTPUT = {"low": 600, "medium": 1200, "high": 2500, "xhigh": 5000, "ma
 @dataclass
 class Candidate:
     model: ModelSpec
-    cost_usd: float
+    cost_usd: float  # the score the router ranks on (may include adjustments)
     cache_state: str
     plan: CachePlan
     note: str = ""
+    # Sticker cost before quality/vendor adjustment, so the two are never
+    # confused — one is what you pay, the other is how we rank.
+    raw_cost_usd: float = 0.0
+    quality_multiplier: float = 1.0
+    quality_samples: int = 0
+    quality_success_rate: float | None = None
 
 
 @dataclass
@@ -72,7 +78,15 @@ class RoutingDecision:
 
 
 class Router:
-    def __init__(self, settings: Settings, store, providers, health=None, switchboard=None):
+    def __init__(
+        self,
+        settings: Settings,
+        store,
+        providers,
+        health=None,
+        switchboard=None,
+        reputation=None,
+    ):
         """``providers`` is a live source of enabled provider names.
 
         Accepts either a plain set (tests, fixed deployments) or anything with
@@ -90,6 +104,9 @@ class Router:
         # Optional: operator on/off switches. Checked before health, because an
         # operator's decision outranks an observation.
         self._switchboard = switchboard
+        # Optional: observed quality per (model, intent). Makes a model that
+        # keeps failing a given task more expensive to choose.
+        self._reputation = reputation
 
     @property
     def _providers(self) -> set[str]:
@@ -124,7 +141,9 @@ class Router:
         volatile_tokens: int,
         expected_output: int,
         is_warm: bool,
-    ) -> tuple[float, str, CachePlan]:
+        intent: str = "",
+        apply_quality: bool = True,
+    ) -> tuple[float, str, CachePlan, float, float]:
         plan = plan_cache_for(model, prefix_tokens, volatile_tokens)
         price_in = model.price_in_per_mtok / 1_000_000
         price_out = model.price_out_per_mtok / 1_000_000
@@ -146,11 +165,20 @@ class Router:
             )
 
         raw = input_cost + expected_output * price_out
+
         # Vendor preference is a deliberate thumb on the scale, not a price.
-        # It is applied to the *score*, never to the ledger — what you are
-        # billed stays the real number.
+        # Applied to the *score*, never to the ledger — what you are billed
+        # stays the real number.
         weight = self._s.vendor_weights.get(model.provider, 1.0)
-        return raw * weight, cache_state, plan
+
+        # Observed quality, priced as expected cost: a model that succeeds a
+        # fraction s of the time needs 1/s attempts, so it really does cost
+        # more than its sticker rate.
+        quality_mult = 1.0
+        if apply_quality and self._reputation and intent and self._s.quality_routing_enabled:
+            quality_mult = self._reputation.multiplier(model.key, intent)
+
+        return raw * weight * quality_mult, cache_state, plan, raw, quality_mult
 
     def _capable(
         self, model: ModelSpec, canonical, total_tokens: int, require_available: bool = True
@@ -205,8 +233,9 @@ class Router:
                 from ..errors import NoCapableModel
 
                 raise NoCapableModel(f"unknown model '{canonical.pin_model}'")
-            cost, cache_state, plan = self._cost(
-                model, prefix_tokens, volatile_tokens, expected_output, False
+            cost, cache_state, plan, raw, _ = self._cost(
+                model, prefix_tokens, volatile_tokens, expected_output, False,
+                apply_quality=False,
             )
             return RoutingDecision(
                 model=model,
@@ -244,6 +273,17 @@ class Router:
 
         warm = await self.warm_model_for(canonical.session_id)
 
+        # Exploration is decided once for the whole request. Deciding it per
+        # candidate would compare some models on adjusted cost and others on
+        # raw cost, which is not a comparison at all.
+        exploring = bool(
+            self._reputation
+            and self._s.quality_routing_enabled
+            and self._reputation.should_explore()
+        )
+        if exploring:
+            reason_bits.append("exploring (quality penalties ignored this request)")
+
         # 4. Build the candidate set.
         from ..catalog import CATALOG
 
@@ -275,10 +315,28 @@ class Router:
             is_warm = bool(
                 self._s.cache_aware_routing and warm is not None and warm.key == model.key
             )
-            cost, cache_state, plan = self._cost(
-                model, prefix_tokens, volatile_tokens, expected_output, is_warm
+            cost, cache_state, plan, raw, qmult = self._cost(
+                model, prefix_tokens, volatile_tokens, expected_output, is_warm,
+                intent=intent, apply_quality=not exploring,
             )
-            candidates.append(Candidate(model, cost, cache_state, plan))
+            candidates.append(
+                Candidate(
+                    model=model,
+                    cost_usd=cost,
+                    cache_state=cache_state,
+                    plan=plan,
+                    raw_cost_usd=raw,
+                    quality_multiplier=qmult,
+                    quality_samples=(
+                        self._reputation.sample_count(model.key, intent)
+                        if self._reputation else 0
+                    ),
+                    quality_success_rate=(
+                        self._reputation.success_rate(model.key, intent)
+                        if self._reputation else None
+                    ),
+                )
+            )
 
         if not candidates:
             from ..errors import NoCapableModel

@@ -28,7 +28,7 @@ from .pipeline import GatewayPipeline
 from .providers import ProviderRegistry
 from .providers.health import HealthMonitor
 from .providers.switchboard import Switchboard
-from .routing import IntentClassifier, Router
+from .routing import IntentClassifier, Reputation, Router
 from .state import build_store
 
 log = logging.getLogger(__name__)
@@ -71,7 +71,16 @@ def create_app() -> FastAPI:
     # The registry is passed live, not snapshotted — credentials can be added
     # at runtime via the console, and routing must pick that up immediately.
     switchboard = Switchboard()
-    router_ = Router(settings, store, registry, health=health, switchboard=switchboard)
+    reputation = Reputation(
+        window=settings.quality_window,
+        min_samples=settings.quality_min_samples,
+        max_penalty=settings.quality_max_penalty,
+        exploration_rate=settings.quality_exploration_rate,
+    )
+    router_ = Router(
+        settings, store, registry,
+        health=health, switchboard=switchboard, reputation=reputation,
+    )
     classifier = IntentClassifier(
         store,
         registry,
@@ -90,6 +99,7 @@ def create_app() -> FastAPI:
     app.state.registry = registry
     app.state.health = health
     app.state.switchboard = switchboard
+    app.state.reputation = reputation
     app.state.router = router_
     app.state.classifier = classifier
     app.state.ledger = ledger
@@ -100,7 +110,7 @@ def create_app() -> FastAPI:
     app.state.auth = Authenticator(settings)
     app.state.pipeline = GatewayPipeline(
         settings, store, registry, router_, classifier, budget, limiter, ledger, sink,
-        health=health,
+        health=health, reputation=reputation,
     )
 
     app.include_router(chat.router)

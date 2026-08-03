@@ -71,6 +71,30 @@ class SwitchUpdate(BaseModel):
     enabled: bool
 
 
+@router.get("/reputation")
+async def reputation(request: Request) -> dict:
+    """Observed quality per (model, intent) — what quality-adjusted routing sees.
+
+    A model is only penalised once there is enough evidence, and a fraction of
+    requests ignore the penalty so a model that has been fixed can recover.
+    """
+    s = request.app.state.settings
+    return {
+        "enabled": s.quality_routing_enabled,
+        "min_samples": s.quality_min_samples,
+        "max_penalty": s.quality_max_penalty,
+        "exploration_rate": s.quality_exploration_rate,
+        "window": s.quality_window,
+        "rows": request.app.state.reputation.snapshot(),
+    }
+
+
+@router.post("/reputation/reset")
+async def reset_reputation(request: Request) -> dict:
+    request.app.state.reputation.reset()
+    return {"reset": True}
+
+
 @router.get("/switchboard")
 async def switchboard(request: Request) -> dict:
     """Which models and vendors are switched on."""

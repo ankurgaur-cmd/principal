@@ -123,6 +123,7 @@ class GatewayPipeline:
         ledger: CostLedger,
         sink: RecordSink,
         health=None,
+        reputation=None,
     ):
         self._s = settings
         self._store = store
@@ -134,6 +135,7 @@ class GatewayPipeline:
         self._ledger = ledger
         self._sink = sink
         self._health = health
+        self._reputation = reputation
         self.pilot = CachePilot(
             store, enabled=settings.cache_pilot_enabled, wait_ms=settings.cache_pilot_wait_ms
         )
@@ -302,6 +304,10 @@ class GatewayPipeline:
                         "tier": c.model.tier.name.lower(),
                         "estimated_cost_usd": round(c.cost_usd, 6),
                         "cache_state": c.cache_state,
+                        "raw_cost_usd": round(c.raw_cost_usd, 6),
+                        "quality_multiplier": round(c.quality_multiplier, 3),
+                        "quality_samples": c.quality_samples,
+                        "quality_success_rate": c.quality_success_rate,
                         "chosen": c.model.key == decision.model.key,
                     }
                     for c in sorted(decision.considered, key=lambda c: c.cost_usd)
@@ -399,6 +405,11 @@ class GatewayPipeline:
                         report.judge.get("reason", ""),
                     )
                 )
+        # Feed the outcome back into routing. This is the loop that lets the
+        # router learn a cheap model is bad at *this* task, rather than being
+        # told so by configuration.
+        if self._reputation:
+            self._reputation.record(model_used.key, intent.intent, report.routing_ok)
         record.quality_verdict = report.verdict
         record.quality_failures = [c.id for c in report.failures]
         record.routing_ok = report.routing_ok

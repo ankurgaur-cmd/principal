@@ -601,6 +601,32 @@ details summary { cursor: pointer; font-size: 12px; color: var(--text-secondary)
     </div>
 
     <div class="card">
+      <h2>Quality reputation — routing learns from outcomes</h2>
+      <div id="repSummary" class="hint">No graded responses yet.</div>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>Model</th><th>Intent</th><th class="num">Samples</th>
+          <th class="num">Success</th><th class="num">Cost ×</th><th>Status</th>
+        </tr></thead>
+        <tbody id="repRows"><tr><td colspan="6" style="color:var(--text-muted)">
+          Send a few requests to build up evidence.</td></tr></tbody>
+      </table></div>
+      <div class="legend">
+        <span style="margin-left:auto">
+          <button id="repResetBtn" style="padding:3px 9px;font-size:12px">Reset reputation</button>
+        </span>
+      </div>
+      <div class="hint">
+        A model that keeps failing a given task becomes more expensive to
+        choose. The multiplier is <b>expected cost</b>, not an arbitrary
+        weight: succeeding half the time means ~2 attempts, so ~2× the price.
+        Nothing is penalised below the sample threshold, and a fixed share of
+        requests ignore reputation entirely — otherwise a penalised model gets
+        no traffic, so it gets no new evidence, and can never recover.
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Model pool — click to switch on/off</h2>
       <div id="vendorSwitches" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"></div>
       <div class="pool" id="pool"><div class="hint">Loading pool…</div></div>
@@ -790,9 +816,10 @@ async function boot() {
   await refreshCreds();
   await refreshPool();
   await refreshFleet();
+  await refreshReputation();
   // Keep the pool live while idle so a probe result or a breaker opening is
   // visible without sending a request.
-  setInterval(() => { refreshPool(lastChosen); refreshFleet(); }, 15000);
+  setInterval(() => { refreshPool(lastChosen); refreshFleet(); refreshReputation(); }, 15000);
 
   try {
     const p = await (await fetch("/admin/policy")).json();
@@ -1039,6 +1066,7 @@ $("sendBtn").onclick = async () => {
     btn.disabled = false; btn.textContent = "Send";
     refreshPool(lastChosen);
     refreshFleet();
+    refreshReputation();
   }
 };
 
@@ -1105,6 +1133,35 @@ function renderQuality(q) {
         </div>`).join("")}
     </div>` : "";
 }
+
+/* ---------- reputation: quality as a routing input ---------- */
+async function refreshReputation() {
+  try {
+    const d = await (await fetch("/admin/reputation")).json();
+    $("repSummary").innerHTML = d.enabled
+      ? `Penalising after <b>${d.min_samples}</b> samples · capped at
+         <b>${d.max_penalty}×</b> · <b>${(d.exploration_rate * 100).toFixed(0)}%</b>
+         of requests explore · window ${d.window}`
+      : '<b>Quality-adjusted routing is off</b> — routing on price alone.';
+
+    $("repRows").innerHTML = d.rows.length ? d.rows.map(r => `
+      <tr>
+        <td>${r.model}</td><td>${r.intent}</td>
+        <td class="num">${r.samples}</td>
+        <td class="num">${r.success_rate == null ? "—" : (r.success_rate * 100).toFixed(0) + "%"}</td>
+        <td class="num">${r.multiplier === 1 ? "—" : r.multiplier.toFixed(2) + "×"}</td>
+        <td style="color:var(--${r.status === "penalised" ? "critical"
+          : r.status === "clean" ? "success-text" : "text-muted"})">
+          ${r.status}${r.needs ? ` (${r.needs} more)` : ""}</td>
+      </tr>`).join("")
+      : '<tr><td colspan="6" style="color:var(--text-muted)">No graded responses yet.</td></tr>';
+  } catch { /* a view, never a blocker */ }
+}
+
+$("repResetBtn").onclick = async () => {
+  await fetch("/admin/reputation/reset", { method: "POST" });
+  await refreshReputation();
+};
 
 /* ---------- fleet: aggregate across all traffic ---------- */
 async function refreshFleet() {

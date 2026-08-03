@@ -134,6 +134,18 @@ def explain(decision, intent_confidence: float, intent_source: str) -> dict:
     elif len(qualified) == 1:
         verdict = "It was the only model that qualified"
         why = "Every other model was ruled out; see below."
+    elif any(c.quality_multiplier > 1.0 for c in qualified):
+        penalised = [c for c in qualified if c.quality_multiplier > 1.0]
+        worst = max(penalised, key=lambda c: c.quality_multiplier)
+        verdict = "Cheapest once past quality was taken into account"
+        why = (
+            f"{model.key} won on cost adjusted for observed quality. "
+            f"{worst.model.key} is cheaper per token but has succeeded on only "
+            f"{(worst.quality_success_rate or 0):.0%} of recent '{intent}' "
+            f"requests, so it effectively costs "
+            f"{worst.quality_multiplier:.1f}x its sticker price — you would "
+            f"expect to retry it."
+        )
     elif runner_up:
         est = decision.estimated_cost_usd
         ratio = runner_up.cost_usd / est if est else 1
