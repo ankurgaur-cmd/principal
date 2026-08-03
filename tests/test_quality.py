@@ -10,7 +10,12 @@ from __future__ import annotations
 import pytest
 from conftest import make_request
 
-from aigateway.quality import REASONING_FLOOR_BY_EFFORT, assess, effort_that_fits
+from aigateway.quality import (
+    REASONING_FLOOR_BY_EFFORT,
+    assess,
+    budget_starves_the_answer,
+    effort_that_fits,
+)
 from aigateway.schemas import ProviderResponse, Usage
 
 
@@ -145,15 +150,32 @@ def test_reasoning_floor_scales_with_effort():
     threshold has to move with it."""
     floors = [REASONING_FLOOR_BY_EFFORT[e] for e in ("low", "medium", "high", "xhigh", "max")]
     assert floors == sorted(floors), "floors must increase with effort"
-    assert REASONING_FLOOR_BY_EFFORT["high"] > REASONING_FLOOR_BY_EFFORT["medium"] * 2
+    assert len(set(floors)) == len(floors), "each level needs its own floor"
+
+
+def test_floors_reflect_what_reasoning_models_actually_spend():
+    """These were guessed once and were 5-10x too low, which made every heavy
+    request return an empty answer. Measured on one heavy prompt, the *cheapest*
+    effort level spent 1,937 tokens on gpt-5 and 2,828 on claude-opus-5 before
+    any visible output. A floor under that is not a floor."""
+    assert REASONING_FLOOR_BY_EFFORT["low"] >= 2828
+
+
+def test_a_budget_under_the_lowest_floor_is_flagged_before_the_call():
+    """Stepping effort down rescues a tight budget only until the bottom rung.
+    Below that there is nothing left to trade, so say so before spending."""
+    assert budget_starves_the_answer(1200) is True
+    assert budget_starves_the_answer(REASONING_FLOOR_BY_EFFORT["low"] - 1) is True
+    assert budget_starves_the_answer(REASONING_FLOOR_BY_EFFORT["low"]) is False
+    assert budget_starves_the_answer(8000) is False
 
 
 def test_effort_steps_down_to_fit_the_budget():
     """Respects the caller's cap rather than raising it — their budget is their
     decision, how much goes to reasoning is ours."""
-    assert effort_that_fits("high", 5000) == "high"
-    assert effort_that_fits("high", 1000) == "medium"
-    assert effort_that_fits("high", 400) == "low"
+    assert effort_that_fits("high", 8000) == "high"
+    assert effort_that_fits("high", 5000) == "medium"
+    assert effort_that_fits("high", 3000) == "low"
     assert effort_that_fits("max", 100) == "low", "never below the bottom rung"
 
 

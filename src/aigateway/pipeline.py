@@ -29,12 +29,18 @@ from typing import Any
 from .auth import Principal
 from .cache.hints import plan_cache
 from .cache.pilot import CachePilot, PilotRole
-from .catalog import ModelSpec
+from .catalog import ModelSpec, Tier
 from .config import Settings
 from .errors import GatewayError, ProviderRefusal, UpstreamError
 from .governance import BudgetGuard, CostLedger, RateLimiter, price_usage
 from .observability import RecordSink, RequestRecord, TraceContext
-from .quality import Check, assess, judge
+from .quality import (
+    REASONING_FLOOR_BY_EFFORT,
+    Check,
+    assess,
+    budget_starves_the_answer,
+    judge,
+)
 from .routing import IntentClassifier, Router, explain
 from .schemas import (
     CanonicalRequest,
@@ -291,6 +297,19 @@ class GatewayPipeline:
                 "provider": decision.model.provider,
                 "tier": decision.tier.name.lower(),
                 "effort": decision.effort,
+                # Warn before the call, not after. Below the lowest reasoning
+                # floor there is no effort left to step down to, so the request
+                # will most likely burn its whole allowance thinking and return
+                # nothing — and the caller pays for it either way.
+                "budget_warning": (
+                    f"max_tokens={canonical.max_tokens} is below the "
+                    f"{REASONING_FLOOR_BY_EFFORT['low']} tokens a reasoning model "
+                    f"typically needs before any visible answer appears on work "
+                    f"this demanding. Expect an empty reply; raise max_tokens."
+                    if budget_starves_the_answer(canonical.max_tokens)
+                    and decision.tier is not Tier.LIGHT
+                    else None
+                ),
                 "reason": decision.reason,
                 # The plain-language account of the same decision. The console
                 # leads with this; `reason` is kept for logs and debugging.

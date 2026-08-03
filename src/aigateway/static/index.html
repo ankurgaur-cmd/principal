@@ -291,13 +291,17 @@ details summary{cursor:pointer;font-size:12px;color:var(--text-secondary)}
             <option value="heavy">heavy</option></select></div>
         </div>
         <div class="row">
-          <div><label for="maxTokens">Max tokens</label><input type="text" id="maxTokens" value="1200"></div>
+          <div><label for="maxTokens">Max tokens</label><input type="text" id="maxTokens" value="8000"></div>
           <div><label for="pace">Playback</label><select id="pace">
             <option value="watch">Watch — step through</option>
             <option value="instant">Instant — real speed</option></select></div>
         </div>
         <div class="hint">Reasoning models bill hidden reasoning against the same output budget,
-          so under ~512 max tokens the answer can come back empty. The gateway catches that.</div>
+          and on demanding work they spend far more of it than you would expect: measured on one
+          heavy review prompt, <b>gpt-5</b> used 1,937 tokens at low effort and 6,080 at high,
+          <b>claude-opus-5</b> 2,828 and 3,886 — before a single visible character. Under ~3,000
+          the answer usually comes back empty on both vendors. The gateway warns before the call
+          and flags it after.</div>
         <div class="row" style="margin-top:14px">
           <button class="primary" id="sendBtn">Send</button>
           <button id="resetBtn">Reset session</button>
@@ -359,6 +363,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--text-secondary)}
 
       <div class="card">
         <h2>Request &amp; response</h2>
+        <div id="renderErr" class="reason err" style="display:none;margin-bottom:10px"></div>
         <div id="qualityVerdict"></div>
         <div class="reqres" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:12px 0">
           <div><div class="wt" style="margin-bottom:5px">Sent to the model</div>
@@ -714,11 +719,11 @@ const PRESETS = {
   easy:{ prompt:"Classify the sentiment of this support ticket as positive, neutral or negative.",
          context:"", maxTokens:"600" },
   hard:{ prompt:"Review this authentication middleware for security issues and race conditions.",
-         context:"You are a senior code reviewer for a payments platform.", maxTokens:"1200" },
+         context:"You are a senior code reviewer for a payments platform.", maxTokens:"8000" },
   cache:{ prompt:"Review this change: it wraps the capture call in a three-attempt retry loop, "
                 +"with no idempotency key on the request. What breaks, and under which interleaving?",
           context:PAYMENTS_REVIEW_STANDARD,
-          maxTokens:"1200" },
+          maxTokens:"8000" },
 };
 document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => {
   const p = PRESETS[b.dataset.preset];
@@ -817,16 +822,19 @@ function renderWhy(ex) {
     <div class="wv">${esc(s.value)}</div><div class="wd">${esc(s.detail)}</div></div></li>`).join("");
 
   // What the router weighed, and on which axis the answer actually turned.
-  const dims = `<div class="excl"><div class="wt" style="margin-bottom:8px">
-    Weighed on — decided by <b style="color:var(--text-primary)">${DECIDED_ON[ex.decided_on] || ex.decided_on}</b></div>
+  // Every field below is optional: an older gateway process serves this same
+  // page but emits a smaller explain payload, and the page has to degrade to
+  // what it was given rather than throw.
+  const dims = ex.dimensions?.length ? `<div class="excl"><div class="wt" style="margin-bottom:8px">
+    Weighed on${ex.decided_on ? ` — decided by <b style="color:var(--text-primary)">${DECIDED_ON[ex.decided_on] || ex.decided_on}</b>` : ""}</div>
     ${ex.dimensions.map(d => `<div class="excl-row">
       <b>${esc(d.name)}</b><span><b style="color:var(--text-primary)">${esc(d.value)}</b> —
-      ${esc(d.detail)}</span></div>`).join("")}</div>`;
+      ${esc(d.detail)}</span></div>`).join("")}</div>` : "";
 
   // Who could have served it, across vendors, and what separated them.
   const qual = ex.qualified?.length ? `<div class="excl">
     <div class="wt" style="margin-bottom:8px">Qualified — ${ex.qualified.length} model(s)
-      across ${ex.vendors_in_play.join(" + ")}</div>
+      across ${(ex.vendors_in_play || []).join(" + ") || "the configured vendors"}</div>
     <div class="scroll"><table><thead><tr><th></th><th>Model</th><th>Vendor</th><th>Tier</th>
       <th class="num">Est. cost</th><th>Why it did or didn't win</th></tr></thead><tbody>
     ${ex.qualified.map(q => `<tr${q.chosen?' style="background:color-mix(in srgb,var(--series-1) 8%,transparent)"':""}>
@@ -841,9 +849,9 @@ function renderWhy(ex) {
   // Grouped by the rule that applied — a tier floor and a missing API key are
   // completely different situations and should not read the same.
   let excl = "";
-  if (ex.excluded.length) {
+  if (ex.excluded?.length) {
     const groups = {};
-    ex.excluded.forEach(e => { (groups[e.kind] ||= []).push(e); });
+    ex.excluded.forEach(e => { (groups[e.kind || "other"] ||= []).push(e); });
     excl = `<div class="excl"><div class="wt" style="margin-bottom:8px">
       Not considered (${ex.excluded.length})</div>
       ${Object.entries(groups).map(([kind, rows]) => `
@@ -884,6 +892,7 @@ $("sendBtn").onclick = async () => {
   $("sentPreview").textContent =
     ($("context").value.trim() ? `[system]\n${$("context").value}\n\n` : "") + `[user]\n${$("prompt").value}`;
   $("answer").textContent = "…";
+  $("renderErr").style.display = "none";
   $("qualityVerdict").innerHTML = ""; $("qualityChecks").innerHTML = "";
   const messages = [];
   if ($("context").value.trim()) messages.push({ role:"system", content:$("context").value });
@@ -893,7 +902,7 @@ $("sendBtn").onclick = async () => {
       method:"POST",
       headers:{ "content-type":"application/json", "x-tenant-id":"demo", "x-agent-id":"console" },
       body: JSON.stringify({ model:"auto", messages,
-        max_tokens: parseInt($("maxTokens").value) || 1200,
+        max_tokens: parseInt($("maxTokens").value) || 8000,
         x_gateway:{ session_id:$("session").value||null, intent:$("intent").value||null,
           effort:$("effort").value||null, max_tier:$("maxTier").value||null } }) });
     if (!res.ok) { const d = await res.json().catch(()=>({}));
@@ -919,7 +928,22 @@ async function consumeTrace(res) {
     for (const f of frames) {
       const line = f.split("\n").find(l => l.startsWith("data: ")); if (!line) continue;
       const raw = line.slice(6); if (raw === "[DONE]") return;
-      const ev = JSON.parse(raw); handleStage(ev);
+      const ev = JSON.parse(raw);
+      /* One panel failing to render must never cost you the answer. These
+         stages arrive in order and the response is the last of them, so an
+         exception thrown while drawing an earlier panel used to abort the
+         whole read loop and the answer never appeared — the page looked like
+         the model had returned nothing. Isolate each stage instead: draw what
+         you can, say which panel broke, keep consuming the stream. */
+      try { handleStage(ev); }
+      catch (err) {
+        console.error(`[console] stage "${ev.stage}" failed to render`, err, ev);
+        $("renderErr").style.display = "";
+        $("renderErr").textContent =
+          `⚠ The "${ev.stage}" panel failed to render (${err.message}). `
+          + `Everything else below is still live. If you just pulled new code, `
+          + `restart the gateway — the page and the server are out of step.`;
+      }
       if (pace && !["accepted","budget","done"].includes(ev.stage)) await sleep(pace);
     }
   }
@@ -950,6 +974,10 @@ function handleStage(ev) {
              <span class="badge">${esc(ev.provider)}</span>`
           + (ev.degraded?' <span class="badge"><b>⚠ degraded</b></span>':"")
           + `<br>${ev.considered.length} candidate(s) scored` });
+      if (ev.budget_warning) {
+        $("renderErr").style.display = "";
+        $("renderErr").textContent = "⚠ " + ev.budget_warning;
+      }
       renderBars(ev.considered); renderPool(ev.model);
       if (ev.explain) renderWhy(ev.explain);
       $("reason").className = "reason";
@@ -1072,7 +1100,7 @@ $("fiBtn").onclick = async () => {
     const res = await fetch("/demo/fanin", {
       method:"POST", headers:{ "content-type":"application/json", "x-tenant-id":"demo" },
       body: JSON.stringify({ task:$("fiTask").value, subtasks, shared_context:$("fiCtx").value,
-        session_id:($("session").value||"demo-1")+"-fanin", max_tokens:600 }) });
+        session_id:($("session").value||"demo-1")+"-fanin", max_tokens:4000 }) });
     const d = await res.json();
     if (!res.ok) throw new Error(d?.error?.message || "fan-in failed");
     const t = d.totals, s = d.synthesis;

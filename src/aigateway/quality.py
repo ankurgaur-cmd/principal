@@ -33,18 +33,47 @@ from dataclasses import dataclass, field
 # a single flat floor was too low for high-effort work, so requests that cleared
 # it still came back empty. Reasoning depth is what consumes the budget, so the
 # threshold has to move with it.
+#
+# These numbers are measured, not guessed. Earlier values (low=300, medium=700,
+# high=1800) were estimates and were 5-10x too low — a heavy request at 1,200
+# tokens returned nothing on *both* vendors, which is what sent us to measure.
+# One heavy code-review prompt, run against a large budget so nothing truncated,
+# completion tokens actually consumed:
+#
+#     effort   gpt-5   claude-opus-5
+#     low       1,937          2,828
+#     medium    2,742          4,445
+#     high      6,080          3,886
+#
+# The floors below take the worse vendor at each level plus headroom. Two caveats
+# worth keeping in mind before treating them as exact: consumption is strongly
+# task-dependent (the same models spent 74 tokens on a one-line question), and
+# this is one prompt, so these are working guards for heavy work rather than
+# published constants. Re-measure when the model line-up changes.
 REASONING_FLOOR_BY_EFFORT = {
-    "low": 300,
-    "medium": 700,
-    "high": 1800,
-    "xhigh": 3500,
-    "max": 6000,
+    "low": 3000,
+    "medium": 5000,
+    "high": 8000,
+    "xhigh": 12000,  # extrapolated — no measurement at this level yet
+    "max": 16000,  # extrapolated
 }
 # Kept for the medium default and for callers that do not know the effort.
 REASONING_OUTPUT_FLOOR = REASONING_FLOOR_BY_EFFORT["medium"]
 
 # Effort levels ordered cheapest-first, for stepping down to fit a budget.
 EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"]
+
+
+def budget_starves_the_answer(max_tokens: int) -> bool:
+    """True when no effort level leaves room for a visible answer.
+
+    Stepping effort down can rescue a tight budget, but only until it hits the
+    bottom rung — below the lowest floor there is nothing left to trade away and
+    the request will very likely spend its whole allowance on reasoning and
+    return an empty reply. Worth saying *before* the call rather than diagnosing
+    it after, because by then the tokens are already paid for.
+    """
+    return max_tokens < REASONING_FLOOR_BY_EFFORT["low"]
 
 
 def effort_that_fits(effort: str, max_tokens: int) -> str:

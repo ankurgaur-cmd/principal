@@ -38,7 +38,11 @@ class FanoutRequest(BaseModel):
     # Above the reasoning floor. At 300 the reasoning consumes the whole
     # budget and every sub-agent returns an empty answer — which reads as a
     # broken fan-out and is really a starved output budget.
-    max_tokens: int = 800
+    # Sub-agents are reasoning models too, and hidden reasoning bills against
+    # this same budget. At 800 every agent returned an empty answer and the
+    # dashboard showed six rows of metrics with nothing in them. Measured floor
+    # for demanding work is ~3,000 on both vendors; 4,000 leaves room to answer.
+    max_tokens: int = 4000
 
 
 @router.post("/fanout")
@@ -148,7 +152,7 @@ class FaninRequest(BaseModel):
     session_id: str = "fanin"
     worker_intent: str | None = None
     synthesis_intent: str | None = "analysis"
-    max_tokens: int = 700
+    max_tokens: int = 4000  # same reasoning-budget floor as fan-out
 
 
 @router.post("/fanin")
