@@ -78,25 +78,50 @@ CACHE_PLAIN = {
     ),
 }
 
-EXCLUSION_PLAIN = {
-    "below the tier this task needs": "not capable enough for this task",
-    "provider not configured": "no API key for this provider",
-    "circuit open (unhealthy)": "taken out of rotation — it has been failing",
-    "switched off by an operator": "switched off by you",
-    "no tool support": "cannot use tools, and this request needs them",
-    "no structured outputs": "cannot guarantee the JSON shape this request asks for",
+# How each exclusion category reads, and what it is really saying.
+#
+# The important one is `tier`. A model kept out by the tier floor is not
+# "incapable" — it is a smaller model than this *particular task* was judged to
+# need. Saying "not capable enough" is both inaccurate and a slur on a model
+# that may be the right answer for the next request. State the rule instead.
+EXCLUSION_LABEL = {
+    "tier": "Below the required intelligence tier",
+    "capacity": "Not enough capacity for this request",
+    "capability": "Missing a capability this request needs",
+    "no_credentials": "No credentials configured",
+    "unhealthy": "Out of rotation — failing",
+    "switched_off": "Switched off by you",
 }
 
 
-def _humanise_exclusion(reason: str) -> str:
-    if reason in EXCLUSION_PLAIN:
-        return EXCLUSION_PLAIN[reason]
-    if reason.startswith("vendor '") and "switched off" in reason:
-        return reason.replace("switched off by an operator", "switched off by you")
+def _humanise_exclusion(entry: dict) -> str:
+    """Say precisely why, in terms of the rule that actually applied."""
+    reason, kind = entry.get("reason", ""), entry.get("kind", "")
+    tier, required = entry.get("tier", "?"), entry.get("required_tier", "?")
+
+    if kind == "tier":
+        # Factual: this model's tier, and the tier the task calls for.
+        return (
+            f"{tier}-tier model; this task was judged to need {required} or better"
+        )
     if reason.startswith("context "):
-        return "context window too small for this prompt"
+        return "context window too small to hold this prompt"
     if reason.startswith("max_output "):
         return "cannot produce a response this long"
+    if reason == "no tool support":
+        return "does not support tool calling, which this request uses"
+    if reason == "no structured outputs":
+        return "cannot guarantee the JSON shape this request asks for"
+    if reason == "provider not configured":
+        return f"no API key configured for {entry.get('provider', 'this vendor')}"
+    if reason == "circuit open (unhealthy)":
+        return "taken out of rotation — it has been failing recently"
+    if "switched off" in reason:
+        return (
+            f"vendor {entry.get('provider', '')} switched off by you"
+            if reason.startswith("vendor ")
+            else "switched off by you"
+        )
     return reason
 
 
@@ -115,16 +140,23 @@ def explain(decision, intent_confidence: float, intent_source: str) -> dict:
     )
 
     # -- 4. the single deciding factor --------------------------------------
+    # Naming the dimension matters: "cheapest" and "only one left" and "already
+    # warm" are different kinds of answer, and conflating them hides which lever
+    # you would pull to change the outcome.
+    decided_on = "cost"
     if decision.pinned:
+        decided_on = "pin"
         verdict = "You pinned this model"
         why = "The request named a specific model, so the router was bypassed entirely."
     elif decision.degraded:
+        decided_on = "budget"
         verdict = "Budget forced a smaller model"
         why = (
             "This tenant is over its spending limit, so the router was capped to "
             "the cheapest tier that could still do the job."
         )
     elif decision.sticky:
+        decided_on = "cache"
         verdict = "Kept the model this session was already using"
         why = (
             f"This session already warmed up {model.key}. Switching to another model "
@@ -132,12 +164,14 @@ def explain(decision, intent_confidence: float, intent_source: str) -> dict:
             "more than the cheaper per-token price would save."
         )
     elif len(qualified) == 1:
+        decided_on = "availability"
         verdict = "It was the only model that qualified"
         why = "Every other model was ruled out; see below."
     elif any(c.quality_multiplier > 1.0 for c in qualified):
         penalised = [c for c in qualified if c.quality_multiplier > 1.0]
         worst = max(penalised, key=lambda c: c.quality_multiplier)
-        verdict = "Cheapest once past quality was taken into account"
+        decided_on = "quality"
+        verdict = "Cheapest once quality was taken into account"
         why = (
             f"{model.key} won on cost adjusted for observed quality. "
             f"{worst.model.key} is cheaper per token but has succeeded on only "
@@ -207,15 +241,93 @@ def explain(decision, intent_confidence: float, intent_source: str) -> dict:
         },
     ]
 
+    # --- the qualified field, across vendors ------------------------------
+    # "Which models could have done this, and what separated them" is the
+    # question a routing decision should answer. Listing only the winner, or
+    # only the losers, answers neither half.
+    ranked = sorted(qualified, key=lambda c: c.cost_usd)
+    cheapest = ranked[0].cost_usd if ranked else 0.0
+    qualified_rows = []
+    for c in ranked:
+        chosen = c.model.key == model.key
+        if chosen:
+            note = "selected"
+        elif c.quality_multiplier > 1.0 and c.raw_cost_usd < decision.estimated_cost_usd:
+            note = (
+                f"cheaper per token, but {c.quality_multiplier:.1f}× penalty from "
+                f"observed quality on '{intent}'"
+            )
+        elif cheapest and c.cost_usd > cheapest:
+            note = f"{c.cost_usd / cheapest:.1f}× the cost of the cheapest option"
+        else:
+            note = "equally priced"
+        qualified_rows.append(
+            {
+                "model": c.model.key,
+                "provider": c.model.provider,
+                "tier": c.model.tier.name.lower(),
+                "cost_usd": round(c.cost_usd, 6),
+                "raw_cost_usd": round(c.raw_cost_usd, 6),
+                "cache_state": c.cache_state,
+                "quality_multiplier": round(c.quality_multiplier, 3),
+                "quality_samples": c.quality_samples,
+                "chosen": chosen,
+                "note": note,
+            }
+        )
+
+    vendors = sorted({c.model.provider for c in qualified})
+
+    # --- the dimensions that were actually weighed ------------------------
+    dimensions = [
+        {
+            "name": "Intelligence required",
+            "value": f"{tier.name.lower()} tier or better",
+            "detail": f"Set by the intent '{intent}'. "
+                      f"{len(decision.excluded)} model(s) fell outside it or were unavailable.",
+        },
+        {
+            "name": "Availability",
+            "value": f"{len(qualified)} model(s) across {len(vendors)} vendor(s)",
+            "detail": "Credentials present, circuit closed, not switched off, and "
+                      "large enough context for this prompt."
+                      + (f" Vendors in play: {', '.join(vendors)}." if vendors else ""),
+        },
+        {
+            "name": "Cost",
+            "value": _fmt(decision.estimated_cost_usd),
+            "detail": "Priced for this exact request — token counts, the vendor's "
+                      "rate at this context size, and what the cache costs or saves.",
+        },
+        {
+            "name": "Cache economics",
+            "value": cache_title,
+            "detail": cache_body,
+        },
+        {
+            "name": "Observed quality",
+            "value": (
+                "no penalties in play"
+                if all(c.quality_multiplier == 1.0 for c in qualified)
+                else "penalties applied"
+            ),
+            "detail": "Models that recently failed this kind of task are priced at "
+                      "their expected cost — succeeding half the time means about "
+                      "twice the attempts, so about twice the price.",
+        },
+    ]
+
     return {
         "headline": (
             f"Sent to {model.key} — {verdict.lower()}."
             if not decision.pinned
             else f"Sent to {model.key} because you pinned it."
         ),
+        "decided_on": decided_on,
         "steps": steps,
-        "excluded": [
-            {**e, "plain": _humanise_exclusion(e["reason"])} for e in decision.excluded
-        ],
+        "qualified": qualified_rows,
+        "vendors_in_play": vendors,
+        "dimensions": dimensions,
+        "excluded": [{**e, "plain": _humanise_exclusion(e)} for e in decision.excluded],
         "technical": decision.reason,
     }

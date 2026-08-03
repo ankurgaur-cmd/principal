@@ -300,7 +300,9 @@ class Router:
                 excluded.append(
                     {
                         "model": model.key,
+                        "provider": model.provider,
                         "tier": model.tier.name.lower(),
+                        "required_tier": required.name.lower(),
                         "reason": "below the tier this task needs",
                         "kind": "tier",
                     }
@@ -311,9 +313,11 @@ class Router:
                 excluded.append(
                     {
                         "model": model.key,
+                        "provider": model.provider,
                         "tier": model.tier.name.lower(),
+                        "required_tier": required.name.lower(),
                         "reason": reject,
-                        "kind": "capability",
+                        "kind": _exclusion_kind(reject),
                     }
                 )
                 continue
@@ -430,6 +434,25 @@ class Router:
             required_tier=required,
             intent=intent,
         )
+
+
+def _exclusion_kind(reason: str) -> str:
+    """Classify a rejection so the explanation can group and word it correctly.
+
+    The distinction that matters: a model kept out by the tier floor is a
+    *policy* decision about this task, not a statement that the model is
+    incapable. Conflating the two produces explanations that read as slurs on
+    perfectly good models.
+    """
+    if "not configured" in reason:
+        return "no_credentials"
+    if "circuit open" in reason:
+        return "unhealthy"
+    if "switched off" in reason:
+        return "switched_off"
+    if reason.startswith("context ") or reason.startswith("max_output "):
+        return "capacity"
+    return "capability"
 
 
 def plan_cache_for(model: ModelSpec, prefix_tokens: int, volatile_tokens: int) -> CachePlan:
