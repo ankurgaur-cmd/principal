@@ -20,7 +20,7 @@ from typing import Any
 from ..cache.hints import CachePlan
 from ..catalog import get_model
 from ..errors import UpstreamError
-from ..quality import REASONING_OUTPUT_FLOOR
+from ..quality import REASONING_FLOOR_BY_EFFORT, effort_that_fits
 from ..schemas import CanonicalRequest, ProviderResponse, Usage
 
 log = logging.getLogger(__name__)
@@ -107,18 +107,21 @@ class OpenAIProvider:
         }.get(effort, "medium")
 
         # Reasoning tokens are billed against the *same* output budget as the
-        # visible answer. Under a tight cap the reasoning can consume all of it
-        # and return an empty reply with finish_reason "length" — which reads as
-        # a gateway fault and is not one. Respect the caller's cap and spend
-        # less of it on reasoning, rather than silently raising their limit.
+        # visible answer. Under a tight cap the reasoning consumes all of it and
+        # returns an empty reply with finish_reason "length" — which reads as a
+        # gateway fault and is not one. Step the effort down until it fits,
+        # rather than silently raising the caller's cap: their budget is their
+        # decision, how much of it goes to reasoning is ours.
         budget = params["max_completion_tokens"]
-        if budget < REASONING_OUTPUT_FLOOR and reasoning != "low":
+        fitted = effort_that_fits(effort, budget)
+        if fitted != effort:
             log.info(
-                "max_tokens=%d is below the reasoning floor (%d); lowering "
-                "reasoning_effort %s -> low so the answer is not starved",
-                budget, REASONING_OUTPUT_FLOOR, reasoning,
+                "max_tokens=%d cannot support effort=%s (needs ~%d); using %s "
+                "so the answer is not starved",
+                budget, effort, REASONING_FLOOR_BY_EFFORT.get(effort, 0), fitted,
             )
-            reasoning = "low"
+            reasoning = {"low": "low", "medium": "medium", "high": "high",
+                         "xhigh": "high", "max": "high"}.get(fitted, "medium")
         params["reasoning_effort"] = reasoning
 
         params.update(canonical.vendor_overrides.get("openai", {}))

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from conftest import make_request
 
-from aigateway.quality import REASONING_OUTPUT_FLOOR, assess
+from aigateway.quality import REASONING_FLOOR_BY_EFFORT, assess, effort_that_fits
 from aigateway.schemas import ProviderResponse, Usage
 
 
@@ -44,8 +44,9 @@ async def test_empty_answer_from_exhausted_budget_is_a_failure(router, decision)
     assert report.routing_ok is False
     check = report.failures[0]
     assert check.id == "reasoning_starved"
-    # The message has to say what to do about it, not just that it happened.
-    assert str(REASONING_OUTPUT_FLOOR) in check.detail
+    # The message has to say what to do about it, not just that it happened,
+    # and quote the floor for the effort actually used.
+    assert str(REASONING_FLOOR_BY_EFFORT[decision.effort]) in check.detail
     assert "max_tokens" in check.detail
 
 
@@ -135,3 +136,32 @@ async def test_summary_is_serialisable(router, decision):
     import json
 
     json.dumps(assess(make_request(), _resp(), decision).summary())
+
+
+# -- the effort ladder -----------------------------------------------------
+def test_reasoning_floor_scales_with_effort():
+    """A single flat floor was too low for high-effort work: requests cleared
+    it and still came back empty. Reasoning depth consumes the budget, so the
+    threshold has to move with it."""
+    floors = [REASONING_FLOOR_BY_EFFORT[e] for e in ("low", "medium", "high", "xhigh", "max")]
+    assert floors == sorted(floors), "floors must increase with effort"
+    assert REASONING_FLOOR_BY_EFFORT["high"] > REASONING_FLOOR_BY_EFFORT["medium"] * 2
+
+
+def test_effort_steps_down_to_fit_the_budget():
+    """Respects the caller's cap rather than raising it — their budget is their
+    decision, how much goes to reasoning is ours."""
+    assert effort_that_fits("high", 5000) == "high"
+    assert effort_that_fits("high", 1000) == "medium"
+    assert effort_that_fits("high", 400) == "low"
+    assert effort_that_fits("max", 100) == "low", "never below the bottom rung"
+
+
+def test_effort_is_never_stepped_up():
+    """Fitting is a downgrade to protect the answer, not licence to spend more."""
+    assert effort_that_fits("low", 100_000) == "low"
+    assert effort_that_fits("medium", 100_000) == "medium"
+
+
+def test_unknown_effort_passes_through():
+    assert effort_that_fits("bogus", 100) == "bogus"

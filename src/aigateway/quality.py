@@ -25,11 +25,40 @@ import json
 from dataclasses import dataclass, field
 
 # Reasoning-capable models bill hidden reasoning tokens against the same output
-# budget as the visible answer. Below roughly this ceiling the reasoning can
-# consume the entire allowance and leave nothing for a reply — the response
-# comes back empty with finish_reason "length", which looks like a gateway bug
-# and is not one.
-REASONING_OUTPUT_FLOOR = 512
+# budget as the visible answer. Below these ceilings the reasoning consumes the
+# entire allowance and leaves nothing for a reply — the response comes back
+# empty with finish_reason "length", which looks like a gateway bug and is not.
+#
+# The floor scales with effort, and this is the part that is easy to get wrong:
+# a single flat floor was too low for high-effort work, so requests that cleared
+# it still came back empty. Reasoning depth is what consumes the budget, so the
+# threshold has to move with it.
+REASONING_FLOOR_BY_EFFORT = {
+    "low": 300,
+    "medium": 700,
+    "high": 1800,
+    "xhigh": 3500,
+    "max": 6000,
+}
+# Kept for the medium default and for callers that do not know the effort.
+REASONING_OUTPUT_FLOOR = REASONING_FLOOR_BY_EFFORT["medium"]
+
+# Effort levels ordered cheapest-first, for stepping down to fit a budget.
+EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"]
+
+
+def effort_that_fits(effort: str, max_tokens: int) -> str:
+    """Highest effort whose reasoning still leaves room for an answer.
+
+    Respects the caller's token cap rather than silently raising it — their
+    budget is their decision; how much of it we spend on reasoning is ours.
+    """
+    if effort not in EFFORT_LADDER:
+        return effort
+    for level in reversed(EFFORT_LADDER[: EFFORT_LADDER.index(effort) + 1]):
+        if max_tokens >= REASONING_FLOOR_BY_EFFORT[level]:
+            return level
+    return "low"
 
 
 @dataclass
@@ -80,6 +109,8 @@ def assess(canonical, response, decision) -> QualityReport:
     has_tools = bool(response.tool_calls)
     finish = response.finish_reason
 
+    floor = REASONING_FLOOR_BY_EFFORT.get(decision.effort, REASONING_OUTPUT_FLOOR)
+
     # --- did we get anything at all? -------------------------------------
     if not text and not has_tools:
         if finish == "length":
@@ -90,8 +121,9 @@ def assess(canonical, response, decision) -> QualityReport:
                     "Empty answer — the output budget was spent on reasoning",
                     f"The model used all {response.usage.completion_tokens} output "
                     f"tokens on internal reasoning and produced no visible reply. "
-                    f"Raise max_tokens above ~{REASONING_OUTPUT_FLOOR}, or lower "
-                    f"effort so more of the budget goes to the answer.",
+                    f"Raise max_tokens above ~{floor} for effort "
+                    f"'{decision.effort}', or lower the effort so more of the "
+                    f"budget goes to the answer.",
                 )
             )
         else:

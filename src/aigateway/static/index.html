@@ -857,19 +857,46 @@ $("fanBtn").onclick = async () => {
     const d = await res.json();
     if (!res.ok) throw new Error(d?.error?.message || "fan-out failed");
     const readers = d.agents.filter(a => a.cache_read_tokens > 0).length;
-    $("fanResult").innerHTML = `<div class="tiles" style="margin-bottom:10px">
+    const bad = d.agents.filter(a => a.quality && a.quality !== "pass").length;
+    // The single most common cause of "caching isn't working": there was
+    // nothing to cache. Say so before showing a table full of zeroes.
+    const cacheNote = d.cacheable
+      ? `<div class="verdict pass" style="margin-bottom:10px"><span class="vi">✓</span><div>
+         Prefix is <b>${d.prefix_tokens.toLocaleString()} tokens</b> — cacheable on
+         ${d.cacheable_on.length} of the catalog's models.</div></div>`
+      : `<div class="verdict warn" style="margin-bottom:10px"><span class="vi">!</span><div>
+         <b>Nothing to cache.</b> The shared prefix is only
+         <b>${d.prefix_tokens.toLocaleString()} tokens</b>, below every model's minimum
+         (1,024 on OpenAI, 512–4,096 on Anthropic). Every agent is cold because there
+         is no cache to share — not because caching is broken. Paste a few paragraphs
+         into <i>Shared context</i> on tab 1 and re-run.</div></div>`;
+
+    $("fanResult").innerHTML = cacheNote + `<div class="tiles" style="margin-bottom:10px">
       <div class="tile"><div class="k">Total cost</div><div class="v">${money(d.total_cost_usd)}</div></div>
       <div class="tile"><div class="k">Cache reads</div><div class="v">${readers}/${d.agents.length}</div></div>
-      <div class="tile"><div class="k">Tokens written</div><div class="v">${d.total_cache_write_tokens.toLocaleString()}</div></div>
-      </div><div class="scroll"><table><thead><tr><th>Agent</th><th>Role</th>
-      <th class="num">Read</th><th class="num">Write</th><th class="num">Cost</th></tr></thead><tbody>
+      <div class="tile"><div class="k">Failed quality</div><div class="v">${bad}/${d.agents.length}</div></div>
+      <div class="tile"><div class="k">Wall clock</div><div class="v">${d.wall_clock_ms}<small> ms</small></div></div>
+      </div>
       ${d.agents.map(a => a.error
-        ? `<tr><td>${a.agent}</td><td colspan="4" style="color:var(--critical)">${esc(a.error)}</td></tr>`
-        : `<tr><td>${a.agent}</td><td>${a.pilot_role==="pilot"?"✎ pilot":a.cache_read_tokens?"✓ reader":"○ cold"}</td>
-           <td class="num">${a.cache_read_tokens.toLocaleString()}</td>
-           <td class="num">${a.cache_write_tokens.toLocaleString()}</td>
-           <td class="num">${money(a.cost_usd)}</td></tr>`).join("")}</tbody></table></div>
-      <div class="hint">${d.wall_clock_ms}ms wall clock. Toggle the pilot and re-run to compare writes.</div>`;
+        ? `<div class="reason err" style="margin-bottom:8px">Agent ${a.agent}: ${esc(a.error)}</div>`
+        : `<details style="border:1px solid var(--border);border-radius:8px;padding:9px 11px;
+              margin-bottom:8px;background:var(--page)">
+             <summary style="color:var(--text-primary);font-size:13px">
+               <b>Agent ${a.agent}</b> · ${esc(a.model)} ·
+               ${a.pilot_role==="pilot"?"✎ pilot":a.cache_read_tokens?"✓ reader":"○ cold"} ·
+               ${money(a.cost_usd)} · ${a.latency_ms}ms ·
+               <span style="color:var(--${a.quality==="pass"?"success-text":a.quality==="fail"?"critical":"warning"})">
+                 ${a.quality==="pass"?"✓":a.quality==="fail"?"✗":"!"} ${a.quality || "—"}</span>
+             </summary>
+             ${a.quality_failures.length
+               ? `<div class="reason err" style="margin-top:8px">${a.quality_failures.map(esc).join("<br>")}</div>`
+               : ""}
+             <div class="answer" style="margin-top:8px;max-height:180px">${esc(a.answer || "(empty)")}</div>
+           </details>`).join("")}
+      <div class="hint">Click an agent to read its answer. Cache read
+        ${d.total_cache_read_tokens.toLocaleString()} tok · written
+        ${d.total_cache_write_tokens.toLocaleString()} tok. On OpenAI there is no separate
+        write step — caching is automatic, so writes stay 0 and only reads appear.</div>`;
   } catch (e) { $("fanResult").innerHTML = `<div class="reason err">✗ ${esc(e.message)}</div>`; }
   finally { btn.disabled = false; btn.textContent = "Run fan-out"; refreshFleet(); }
 };

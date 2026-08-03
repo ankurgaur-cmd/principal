@@ -19,8 +19,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from ..catalog import CATALOG
 from ..errors import GatewayError
+from ..pipeline import canonicalise
 from ..schemas import ChatCompletionRequest, ChatMessage, GatewayExtensions
+from ..tokens import estimate_request_tokens
 
 router = APIRouter(prefix="/demo", tags=["demo"])
 
@@ -32,6 +35,10 @@ class FanoutRequest(BaseModel):
     session_id: str = "fanout"
     intent: str | None = None
     pilot_enabled: bool = True
+    # Above the reasoning floor. At 300 the reasoning consumes the whole
+    # budget and every sub-agent returns an empty answer — which reads as a
+    # broken fan-out and is really a starved output budget.
+    max_tokens: int = 800
 
 
 @router.post("/fanout")
@@ -60,7 +67,7 @@ async def fanout(body: FanoutRequest, request: Request) -> dict:
         return ChatCompletionRequest(
             model="auto",
             messages=messages,
-            max_tokens=300,
+            max_tokens=body.max_tokens,
             x_gateway=GatewayExtensions(session_id=body.session_id, intent=body.intent),
         )
 
@@ -92,13 +99,31 @@ async def fanout(body: FanoutRequest, request: Request) -> dict:
             {
                 "agent": index + 1,
                 "model": meta.chosen_model,
+                "provider": meta.provider,
+                "tier": meta.tier,
                 "pilot_role": meta.pilot_role,
                 "cache_read_tokens": meta.cache_read_tokens,
                 "cache_write_tokens": meta.cache_write_tokens,
                 "cost_usd": meta.actual_cost_usd,
                 "latency_ms": meta.latency_ms,
+                "hosts": meta.trace.get("hosts_contacted", []),
+                # Without the answer and its verdict this panel is a set of
+                # numbers you cannot judge — you can see what it cost but not
+                # whether it was worth anything.
+                "answer": result.choices[0].message.content or "",
+                "quality": meta.quality.get("verdict"),
+                "quality_failures": [
+                    c["title"]
+                    for c in meta.quality.get("checks", [])
+                    if c.get("level") == "fail"
+                ],
             }
         )
+
+    prefix_tokens, _ = estimate_request_tokens(canonicalise(build(0)))
+    cacheable_on = [
+        m.key for m in CATALOG.values() if prefix_tokens >= m.min_cacheable_tokens
+    ]
 
     return {
         "agents": agents,
@@ -107,6 +132,12 @@ async def fanout(body: FanoutRequest, request: Request) -> dict:
         "total_cost_usd": round(total_cost, 6),
         "total_cache_read_tokens": total_read,
         "total_cache_write_tokens": total_write,
+        # Why the run behaved as it did. Without this, "everything was cold"
+        # looks like a broken cache when it usually means the shared prefix was
+        # too small to cache anywhere.
+        "prefix_tokens": prefix_tokens,
+        "cacheable_on": cacheable_on,
+        "cacheable": bool(cacheable_on),
     }
 
 

@@ -321,8 +321,15 @@ class GatewayPipeline:
         record.cache_plan = plan.reason
 
         # 8. cache pilot — the fan-out fix
+        # Only engage the pilot when there is a cache to protect. Serialising
+        # requests whose prefix is too short to cache makes followers wait out
+        # the full pilot timeout for an entry that can never exist — pure added
+        # latency for zero saving, which is worse than not having the pilot.
         pilot_started = time.perf_counter()
-        role = await self.pilot.acquire(plan.fingerprint, self._s.session_ttl_seconds)
+        if plan.cacheable:
+            role = await self.pilot.acquire(plan.fingerprint, self._s.session_ttl_seconds)
+        else:
+            role = PilotRole.DISABLED
         record.pilot_role = role.value
         if trace is not None and role in (PilotRole.FOLLOWER, PilotRole.TIMEOUT):
             # Only record a hop when the pilot actually made us wait — a hop
@@ -358,7 +365,7 @@ class GatewayPipeline:
                 await self.pilot.release_failed(plan.fingerprint)
             raise
 
-        if role is PilotRole.PILOT:
+        if role is PilotRole.PILOT and plan.cacheable:
             await self.pilot.mark_warm(plan.fingerprint, self._s.session_ttl_seconds)
 
         await self._router.remember(canonical.session_id, model_used)
