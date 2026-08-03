@@ -183,3 +183,84 @@ def test_lapsed_promotional_pricing_is_detected():
     assert "claude-sonnet-5" in lapsed
     assert lapsed["claude-sonnet-5"]["catalog_price"] == (2.00, 10.00)
     assert lapsed["claude-sonnet-5"]["actual_price"] == (3.00, 15.00)
+
+
+# -- tiered (long-context) pricing ----------------------------------------
+def test_long_context_rates_apply_past_the_threshold():
+    """OpenAI roughly doubles above 272K. Using the headline rate would
+    under-price exactly the requests where the bill is biggest."""
+    from aigateway.catalog import get_model
+
+    gpt5 = get_model("gpt-5")
+    assert gpt5.rates_for(100_000) == (1.25, 10.00)
+    assert gpt5.rates_for(272_000) == (1.25, 10.00), "threshold is exclusive"
+    assert gpt5.rates_for(300_000) == (2.50, 20.00)
+
+
+def test_anthropic_has_no_long_context_premium():
+    """The full 1M window bills at the standard rate — a real difference
+    between the vendors that the router must not flatten."""
+    from aigateway.catalog import get_model
+
+    opus = get_model("claude-opus-5")
+    assert opus.long_context_threshold is None
+    assert opus.rates_for(900_000) == (5.00, 25.00)
+
+
+async def test_router_prices_a_large_request_on_the_long_tier(settings, store):
+    """Uses gpt-5.6-sol, whose 1.05M window can actually reach its own 272K
+    tier. The gpt-5 family cannot — see test_unreachable_tiers_are_flagged."""
+    from aigateway.routing import Router
+
+    router = Router(settings, store, {"anthropic", "openai"})
+    small = await router.route(make_request(system_tokens=50_000), "code_review")
+    large = await router.route(make_request(system_tokens=400_000), "code_review")
+
+    small_sol = next(c for c in small.considered if c.model.key == "gpt-5.6-sol")
+    large_sol = next(c for c in large.considered if c.model.key == "gpt-5.6-sol")
+    # 8x the prefix and >2x the rate, so more than 8x the cost.
+    ratio = large_sol.cost_usd / small_sol.cost_usd
+    assert ratio > 8, f"long-context premium not applied (ratio {ratio:.1f})"
+
+
+def test_unreachable_price_tiers_are_flagged():
+    """A long-context tier whose threshold equals the context window can never
+    apply, so one of the two numbers is wrong. The catalog says so rather than
+    carrying the contradiction silently."""
+    from aigateway.catalog import catalog_warnings
+
+    warnings = catalog_warnings()
+    assert any("can never apply" in w for w in warnings)
+    assert any("gpt-5:" in w for w in warnings)
+
+
+def test_unverified_context_windows_are_conservative():
+    """An understated window only excludes a model from a large request. An
+    overstated one would route to a model that cannot serve it."""
+    from aigateway.catalog import CATALOG
+
+    for spec in CATALOG.values():
+        if not spec.context_verified:
+            assert spec.context_window <= 1_050_000
+
+
+def test_ledger_and_router_price_on_the_same_tier():
+    """If the ledger used the headline rate while the router used the long
+    one, spend and estimate would diverge for the largest requests."""
+    from aigateway.catalog import get_model
+    from aigateway.governance import price_usage
+    from aigateway.schemas import Usage
+
+    gpt5 = get_model("gpt-5")
+    priced = price_usage(Usage(prompt_tokens=400_000, completion_tokens=0), gpt5)
+    # 400k tokens at the long-context input rate of $2.50/MTok.
+    assert priced.total_usd == pytest.approx(400_000 * 2.50 / 1_000_000)
+
+
+def test_newly_provisioned_models_are_in_the_catalog():
+    from aigateway.catalog import CATALOG
+
+    for key in ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"):
+        assert key in CATALOG
+        assert CATALOG[key].price_verified
+        assert CATALOG[key].price_checked == "2026-08-03"

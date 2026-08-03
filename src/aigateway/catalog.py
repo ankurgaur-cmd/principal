@@ -88,6 +88,32 @@ class ModelSpec:
     price_after_expiry: tuple[float, float] | None = None
     price_note: str = ""
 
+    # Some vendors charge more once a request crosses a context threshold —
+    # OpenAI roughly doubles above 272K. A router that ignores this will
+    # under-price large-context requests by 2x and pick the wrong model for
+    # exactly the workloads where the bill is biggest.
+    # Anthropic deliberately has no long-context premium: the full 1M window
+    # is billed at the standard rate.
+    long_context_threshold: int | None = None
+    price_in_long_per_mtok: float | None = None
+    price_out_long_per_mtok: float | None = None
+
+    # Context windows are harder to verify than prices — vendors publish them
+    # less consistently. False means the value is a conservative guess, which
+    # only ever excludes a model from a large request (safe), never includes
+    # one that cannot serve it.
+    context_verified: bool = True
+
+    def rates_for(self, input_tokens: int) -> tuple[float, float]:
+        """Input/output rates that apply at this request size."""
+        if (
+            self.long_context_threshold is not None
+            and input_tokens > self.long_context_threshold
+            and self.price_in_long_per_mtok is not None
+        ):
+            return self.price_in_long_per_mtok, self.price_out_long_per_mtok
+        return self.price_in_per_mtok, self.price_out_per_mtok
+
     def supports(self, cap: str) -> bool:
         return cap in self.capabilities
 
@@ -117,7 +143,7 @@ _OPENAI_CAPS = frozenset(
 
 ANTHROPIC_PRICING = "https://platform.claude.com/docs/en/about-claude/pricing"
 OPENAI_PRICING = "https://developers.openai.com/api/docs/pricing"
-CHECKED = "2026-07-31"
+CHECKED = "2026-08-03"
 
 
 CATALOG: dict[str, ModelSpec] = {
@@ -201,6 +227,10 @@ CATALOG: dict[str, ModelSpec] = {
         min_cacheable_tokens=1024,
         capabilities=_OPENAI_CAPS,
         rate_limit_pool="openai-nano",
+        long_context_threshold=272_000,
+        price_in_long_per_mtok=0.1,
+        price_out_long_per_mtok=0.8,
+        context_verified=False,
         price_source=OPENAI_PRICING,
         price_checked=CHECKED,
     ),
@@ -218,6 +248,10 @@ CATALOG: dict[str, ModelSpec] = {
         min_cacheable_tokens=1024,
         capabilities=_OPENAI_CAPS,
         rate_limit_pool="openai-nano",
+        long_context_threshold=272_000,
+        price_in_long_per_mtok=0.4,
+        price_out_long_per_mtok=2.5,
+        context_verified=False,
         price_source=OPENAI_PRICING,
         price_checked=CHECKED,
     ),
@@ -235,6 +269,10 @@ CATALOG: dict[str, ModelSpec] = {
         min_cacheable_tokens=1024,
         capabilities=_OPENAI_CAPS,
         rate_limit_pool="openai-mini",
+        long_context_threshold=272_000,
+        price_in_long_per_mtok=0.5,
+        price_out_long_per_mtok=4.0,
+        context_verified=False,
         price_source=OPENAI_PRICING,
         price_checked=CHECKED,
     ),
@@ -252,6 +290,10 @@ CATALOG: dict[str, ModelSpec] = {
         min_cacheable_tokens=1024,
         capabilities=_OPENAI_CAPS,
         rate_limit_pool="openai-mini",
+        long_context_threshold=272_000,
+        price_in_long_per_mtok=1.5,
+        price_out_long_per_mtok=9.0,
+        context_verified=False,
         price_source=OPENAI_PRICING,
         price_checked=CHECKED,
     ),
@@ -269,6 +311,10 @@ CATALOG: dict[str, ModelSpec] = {
         min_cacheable_tokens=1024,
         capabilities=_OPENAI_CAPS,
         rate_limit_pool="openai-flagship",
+        long_context_threshold=272_000,
+        price_in_long_per_mtok=2.5,
+        price_out_long_per_mtok=20.0,
+        context_verified=False,
         price_source=OPENAI_PRICING,
         price_checked=CHECKED,
     ),
@@ -286,6 +332,75 @@ CATALOG: dict[str, ModelSpec] = {
         min_cacheable_tokens=1024,
         capabilities=_OPENAI_CAPS,
         rate_limit_pool="openai-flagship",
+        long_context_threshold=272_000,
+        price_in_long_per_mtok=5.0,
+        price_out_long_per_mtok=30.0,
+        context_verified=False,
+        price_source=OPENAI_PRICING,
+        price_checked=CHECKED,
+    ),
+    # --- newly provisioned on this account (checked 2026-08-03) ---
+    # These are all pricier than the gpt-5 generation, so price alone will not
+    # select them. That is correct and deliberate: if they are better, the
+    # quality reputation will earn them traffic. Asserting it up front would be
+    # a guess dressed as a policy.
+    "gpt-5.6-luna": ModelSpec(
+        key="gpt-5.6-luna",
+        provider="openai",
+        vendor_model_id="gpt-5.6-luna",
+        tier=Tier.LIGHT,
+        price_in_per_mtok=0.20,
+        price_out_per_mtok=1.20,
+        long_context_threshold=272_000,
+        price_in_long_per_mtok=0.40,
+        price_out_long_per_mtok=1.80,
+        context_window=1_050_000,
+        max_output_tokens=128_000,
+        cache_write_multiplier_5m=1.0,
+        cache_write_multiplier_1h=1.0,
+        min_cacheable_tokens=1024,
+        capabilities=_OPENAI_CAPS,
+        rate_limit_pool="openai-luna",
+        price_source=OPENAI_PRICING,
+        price_checked=CHECKED,
+    ),
+    "gpt-5.6-terra": ModelSpec(
+        key="gpt-5.6-terra",
+        provider="openai",
+        vendor_model_id="gpt-5.6-terra",
+        tier=Tier.STANDARD,
+        price_in_per_mtok=2.00,
+        price_out_per_mtok=12.00,
+        long_context_threshold=272_000,
+        price_in_long_per_mtok=4.00,
+        price_out_long_per_mtok=18.00,
+        context_window=1_050_000,
+        max_output_tokens=128_000,
+        cache_write_multiplier_5m=1.0,
+        cache_write_multiplier_1h=1.0,
+        min_cacheable_tokens=1024,
+        capabilities=_OPENAI_CAPS,
+        rate_limit_pool="openai-terra",
+        price_source=OPENAI_PRICING,
+        price_checked=CHECKED,
+    ),
+    "gpt-5.6-sol": ModelSpec(
+        key="gpt-5.6-sol",
+        provider="openai",
+        vendor_model_id="gpt-5.6-sol",
+        tier=Tier.HEAVY,
+        price_in_per_mtok=5.00,
+        price_out_per_mtok=30.00,
+        long_context_threshold=272_000,
+        price_in_long_per_mtok=10.00,
+        price_out_long_per_mtok=45.00,
+        context_window=1_050_000,
+        max_output_tokens=128_000,
+        cache_write_multiplier_5m=1.0,
+        cache_write_multiplier_1h=1.0,
+        min_cacheable_tokens=1024,
+        capabilities=_OPENAI_CAPS,
+        rate_limit_pool="openai-sol",
         price_source=OPENAI_PRICING,
         price_checked=CHECKED,
     ),
@@ -307,6 +422,29 @@ def available_models(enabled_providers: set[str]) -> list[ModelSpec]:
 def unverified_prices() -> list[str]:
     """Models whose price is a placeholder rather than a confirmed rate."""
     return [m.key for m in CATALOG.values() if not m.price_verified]
+
+
+def catalog_warnings() -> list[str]:
+    """Internal inconsistencies in the catalog itself.
+
+    The one that actually bit: a long-context price tier whose threshold equals
+    the model's context window is unreachable — the tier can never apply, which
+    means one of the two numbers is wrong. Since the router selects on price,
+    silently carrying a contradictory rate is worse than saying so.
+    """
+    out: list[str] = []
+    for m in CATALOG.values():
+        if m.long_context_threshold and m.long_context_threshold >= m.context_window:
+            out.append(
+                f"{m.key}: long-context pricing above {m.long_context_threshold:,} tokens "
+                f"can never apply — the context window is {m.context_window:,}. Either the "
+                f"window is larger than recorded (likely: the vendor publishes a tier for it) "
+                f"or the tier does not exist. context_verified="
+                f"{m.context_verified}."
+            )
+        if not m.context_verified:
+            out.append(f"{m.key}: context window is an unverified conservative estimate.")
+    return out
 
 
 def stale_prices(today: str | None = None) -> list[dict]:

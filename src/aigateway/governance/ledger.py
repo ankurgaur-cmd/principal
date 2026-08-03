@@ -44,8 +44,12 @@ class PricedUsage:
 
 
 def price_usage(usage: Usage, model: ModelSpec, cache_ttl: str = "5m") -> PricedUsage:
-    price_in = model.price_in_per_mtok / 1_000_000
-    price_out = model.price_out_per_mtok / 1_000_000
+    # Same tiered rates the router scored against — if the ledger used the
+    # headline rate while the router used the long-context one, spend and
+    # estimate would diverge for exactly the largest requests.
+    rate_in, rate_out = model.rates_for(usage.prompt_tokens)
+    price_in = rate_in / 1_000_000
+    price_out = rate_out / 1_000_000
 
     fresh = max(0, usage.prompt_tokens - usage.cache_read_tokens - usage.cache_write_tokens)
     return PricedUsage(

@@ -145,8 +145,13 @@ class Router:
         apply_quality: bool = True,
     ) -> tuple[float, str, CachePlan, float, float]:
         plan = plan_cache_for(model, prefix_tokens, volatile_tokens)
-        price_in = model.price_in_per_mtok / 1_000_000
-        price_out = model.price_out_per_mtok / 1_000_000
+        # Rates can step up past a context threshold (OpenAI roughly doubles
+        # above 272K; Anthropic has no such premium). Using the headline rate
+        # for a large-context request under-prices it by 2x, which is exactly
+        # backwards for the workloads where the bill is biggest.
+        rate_in, rate_out = model.rates_for(prefix_tokens + volatile_tokens)
+        price_in = rate_in / 1_000_000
+        price_out = rate_out / 1_000_000
 
         if not plan.cacheable:
             cache_state = "uncached"

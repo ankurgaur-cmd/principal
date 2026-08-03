@@ -154,7 +154,7 @@ def create_app() -> FastAPI:
             "budget_mode": settings.budget_mode,
         }
 
-    from .catalog import stale_prices, unverified_prices
+    from .catalog import catalog_warnings, stale_prices, unverified_prices
 
     if placeholders := unverified_prices():
         log.warning(
@@ -169,6 +169,9 @@ def create_app() -> FastAPI:
             lapsed["model"], lapsed["expired_on"],
             lapsed["catalog_price"], lapsed["actual_price"],
         )
+
+    for issue in catalog_warnings():
+        log.warning("catalog: %s", issue)
 
     if not settings.redis_url:
         log.warning(
