@@ -435,6 +435,40 @@ the wrong vendor, and looks deliberate while doing it.
 accident. Until those numbers are confirmed, any cross-vendor comparison in this
 gateway should be read as provisional.
 
+### D24 — Reasoning budgets are measured, and guarded before the call
+**Context.** Reasoning tokens bill against the same output budget as the visible
+answer. Under a tight cap the model spends the whole allowance thinking and
+returns an empty reply with `finish_reason: length` — which reads as a gateway
+fault, is not one, and is paid for regardless.
+
+The first version of this guard used estimated floors (`low` 300, `medium` 700,
+`high` 1800). They were 5-10× too low. `effort_that_fits()` was doing its job —
+stepping `high` down to `medium` — and the answer still came back empty, because
+the number it was fitting to was fiction.
+
+**Decision.** Floors come from measurement. One heavy code-review prompt, run
+against a budget large enough that nothing truncated, completion tokens actually
+consumed before any visible character:
+
+| effort | gpt-5 | claude-opus-5 |
+|---|---|---|
+| low | 1,937 | 2,828 |
+| medium | 2,742 | 4,445 |
+| high | 6,080 | 3,886 |
+
+`REASONING_FLOOR_BY_EFFORT` takes the worse vendor at each level plus headroom.
+`xhigh` and `max` are extrapolated and commented as such. Stepping effort down
+rescues a tight budget only until the bottom rung, so `budget_starves_the_answer()`
+reports a budget below the lowest floor at routing time, and the pipeline emits it
+on the `routed` stage — before the tokens are spent, not after.
+
+**Consequences.** The floors are honest about their provenance and their limits:
+consumption is strongly task-dependent (the same models spent 74 tokens on a
+one-line question), and this is one prompt on two models, so they are working
+guards for demanding work rather than published constants. They need re-measuring
+when the line-up changes — which is the same obligation D23 places on pricing.
+Callers with tight budgets now get told up front instead of billed for silence.
+
 ### D21 — A streamed stage trace for the console
 **Context.** A routing decision that appears all at once, after the fact, is
 indistinguishable from a mock. Animating it on a timer would be a lie.
