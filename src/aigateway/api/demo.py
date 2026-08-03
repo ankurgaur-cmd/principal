@@ -110,6 +110,136 @@ async def fanout(body: FanoutRequest, request: Request) -> dict:
     }
 
 
+class FaninRequest(BaseModel):
+    task: str
+    subtasks: list[str]
+    shared_context: str = ""
+    session_id: str = "fanin"
+    worker_intent: str | None = None
+    synthesis_intent: str | None = "analysis"
+    max_tokens: int = 700
+
+
+@router.post("/fanin")
+async def fanin(body: FaninRequest, request: Request) -> dict:
+    """Scatter/gather: N workers in parallel, then one synthesiser over their output.
+
+    This is the shape most multi-agent systems actually take, and it is where a
+    router earns its keep — the workers are doing narrow, well-specified jobs
+    that a small model handles fine, while the synthesis step has to hold all
+    their output at once and reason across it. Routing them identically wastes
+    money on the workers or under-powers the synthesis.
+
+    Every leg is routed independently and traced, so you can see the tier split
+    happen rather than being told it does.
+    """
+    app = request.app
+    principal = await app.state.auth.authenticate(request)
+    pipeline = app.state.pipeline
+    started = time.perf_counter()
+
+    def build(prompt: str, intent: str | None, session: str) -> ChatCompletionRequest:
+        messages = []
+        if body.shared_context:
+            messages.append(ChatMessage(role="system", content=body.shared_context))
+        messages.append(ChatMessage(role="user", content=prompt))
+        return ChatCompletionRequest(
+            model="auto",
+            messages=messages,
+            max_tokens=body.max_tokens,
+            x_gateway=GatewayExtensions(session_id=session, intent=intent),
+        )
+
+    # --- scatter -----------------------------------------------------------
+    scatter_started = time.perf_counter()
+    results = await asyncio.gather(
+        *(
+            pipeline.handle(
+                build(sub, body.worker_intent, f"{body.session_id}-w{i}"), principal
+            )
+            for i, sub in enumerate(body.subtasks)
+        ),
+        return_exceptions=True,
+    )
+    scatter_ms = int((time.perf_counter() - scatter_started) * 1000)
+
+    workers = []
+    findings: list[str] = []
+    for i, (sub, result) in enumerate(zip(body.subtasks, results, strict=False)):
+        if isinstance(result, BaseException):
+            detail = str(result.detail) if isinstance(result, GatewayError) else repr(result)
+            workers.append({"worker": i + 1, "subtask": sub, "error": detail})
+            continue
+        text = result.choices[0].message.content or ""
+        meta = result.x_gateway
+        findings.append(f"### {sub}\n{text}")
+        workers.append(
+            {
+                "worker": i + 1,
+                "subtask": sub,
+                "model": meta.chosen_model,
+                "provider": meta.provider,
+                "tier": meta.tier,
+                "intent": meta.resolved_intent,
+                "cost_usd": meta.actual_cost_usd,
+                "latency_ms": meta.latency_ms,
+                "cached_tokens": meta.cache_read_tokens,
+                "hosts": meta.trace.get("hosts_contacted", []),
+                "quality": meta.quality.get("verdict"),
+                "answer": text[:400],
+            }
+        )
+
+    if not findings:
+        raise GatewayError(502, "every worker failed; nothing to synthesise", code="fanin_failed")
+
+    # --- gather ------------------------------------------------------------
+    gather_started = time.perf_counter()
+    synthesis_prompt = (
+        f"{body.task}\n\nYou have the following findings from parallel workers. "
+        f"Synthesise them into one coherent answer, noting any disagreement.\n\n"
+        + "\n\n".join(findings)
+    )
+    synthesis = await pipeline.handle(
+        build(synthesis_prompt, body.synthesis_intent, f"{body.session_id}-synth"), principal
+    )
+    gather_ms = int((time.perf_counter() - gather_started) * 1000)
+    smeta = synthesis.x_gateway
+
+    worker_cost = sum(w.get("cost_usd", 0.0) for w in workers)
+    tiers = {w.get("tier") for w in workers if w.get("tier")}
+
+    return {
+        "workers": workers,
+        "synthesis": {
+            "model": smeta.chosen_model,
+            "provider": smeta.provider,
+            "tier": smeta.tier,
+            "intent": smeta.resolved_intent,
+            "cost_usd": smeta.actual_cost_usd,
+            "latency_ms": smeta.latency_ms,
+            "prompt_tokens": synthesis.usage.prompt_tokens,
+            "hosts": smeta.trace.get("hosts_contacted", []),
+            "quality": smeta.quality.get("verdict"),
+            "answer": synthesis.choices[0].message.content or "",
+        },
+        "totals": {
+            "workers": len(workers),
+            "worker_cost_usd": round(worker_cost, 6),
+            "synthesis_cost_usd": round(smeta.actual_cost_usd, 6),
+            "total_cost_usd": round(worker_cost + smeta.actual_cost_usd, 6),
+            "scatter_ms": scatter_ms,
+            "gather_ms": gather_ms,
+            "wall_clock_ms": int((time.perf_counter() - started) * 1000),
+            # The headline: did the router actually split the tiers, or send
+            # everything to the same model?
+            "worker_tiers": sorted(t for t in tiers if t),
+            "synthesis_tier": smeta.tier,
+            "tier_split": bool(tiers) and smeta.tier not in tiers,
+        },
+    }
+
+
 @router.post("/trace")
 async def trace(body: ChatCompletionRequest, request: Request):
     """Run a request and stream each pipeline stage as it completes.

@@ -516,3 +516,75 @@ def test_console_is_served_uncacheable(client):
     """A cached console silently hides new panels, which looks like a bug."""
     res = client.get("/")
     assert "no-store" in res.headers.get("cache-control", "")
+
+
+def test_fanin_routes_each_leg_independently(client):
+    """Scatter/gather is where a router earns its keep — narrow worker jobs and
+    a synthesis step that must hold all of their output should not land on the
+    same model just because they arrived together."""
+    res = client.post(
+        "/demo/fanin",
+        json={
+            "task": "Should we adopt this?",
+            "subtasks": [
+                "Classify the risk as low, medium or high",
+                "Review this design for race conditions",
+            ],
+            "shared_context": BIG_CONTEXT,
+            "session_id": "fi-test",
+            "max_tokens": 400,
+        },
+        headers={"x-tenant-id": "t-e2e", "x-agent-id": "fanin"},
+    )
+    assert res.status_code == 200, res.text
+    d = res.json()
+
+    assert len(d["workers"]) == 2
+    assert d["synthesis"]["model"]
+    # Each leg is classified on its own merits, not inherited from the parent.
+    intents = {w["intent"] for w in d["workers"] if "intent" in w}
+    assert len(intents) > 1, f"subtasks of different difficulty collapsed: {intents}"
+
+    t = d["totals"]
+    assert t["total_cost_usd"] == pytest.approx(
+        t["worker_cost_usd"] + t["synthesis_cost_usd"], rel=1e-6
+    )
+    assert t["scatter_ms"] >= 0 and t["gather_ms"] >= 0
+
+
+def test_fanin_scatter_really_is_parallel(client):
+    """Wall clock should track the slowest worker, not their sum."""
+    res = client.post(
+        "/demo/fanin",
+        json={
+            "task": "Summarise",
+            "subtasks": ["Classify this", "Summarize this", "Translate this"],
+            "shared_context": BIG_CONTEXT,
+            "session_id": "fi-par",
+            "max_tokens": 300,
+        },
+        headers={"x-tenant-id": "t-e2e"},
+    ).json()
+
+    workers = [w for w in res["workers"] if "latency_ms" in w]
+    assert len(workers) == 3
+    serial = sum(w["latency_ms"] for w in workers)
+    assert res["totals"]["scatter_ms"] < serial, "workers did not run concurrently"
+
+
+def test_fanin_fails_loudly_if_every_worker_fails(client):
+    """Synthesising over nothing would produce a confident, empty answer."""
+    res = client.post(
+        "/demo/fanin",
+        json={"task": "x", "subtasks": [], "session_id": "fi-empty"},
+        headers={"x-tenant-id": "t-e2e"},
+    )
+    assert res.status_code == 502
+    assert "nothing to synthesise" in res.json()["error"]["message"]
+
+
+def test_console_exposes_all_four_tabs(client):
+    page = client.get("/").text
+    for tab in ("route", "agents", "fleet", "models"):
+        assert f'data-tab="{tab}"' in page
+    assert "Fan-in" in page and "Fan-out" in page
