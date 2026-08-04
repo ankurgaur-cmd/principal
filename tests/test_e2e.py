@@ -196,6 +196,67 @@ def test_fanout_pilot_means_one_writer(client):
     assert len(readers) >= 6, f"the rest should read it, got {len(readers)}"
 
 
+def test_fanout_returns_each_agents_answer_and_the_task_it_answered(client):
+    """The panel was a table of metrics with no output in it: you could see what
+    each agent cost but not whether it produced anything worth the money. An
+    answer is also unreviewable without the question it answered."""
+    res = client.post(
+        "/demo/fanout",
+        json={
+            "prompt": "Audit one module.",
+            "shared_context": BIG_CONTEXT,
+            "agents": 3,
+            "session_id": "fan-answers",
+        },
+        headers={"x-tenant-id": "t-e2e"},
+    )
+    assert res.status_code == 200, res.text
+
+    for agent in res.json()["agents"]:
+        assert agent["task"], "every agent reports what it was asked"
+        assert agent["answer"], "and what it answered"
+        assert agent["quality"] in ("pass", "warn", "fail")
+
+
+def test_fanout_gives_each_agent_its_own_task_when_asked(client):
+    """Sending all N the identical prompt produces N near-identical answers,
+    which makes per-agent output impossible to judge. The shared prefix is what
+    the cache needs to be identical — the tasks are not."""
+    subtasks = ["Check the retries.", "Check the ledger.", "Check the tests."]
+    res = client.post(
+        "/demo/fanout",
+        json={
+            "prompt": "ignored when subtasks are given",
+            "shared_context": BIG_CONTEXT,
+            "agents": 3,
+            "subtasks": subtasks,
+            "session_id": "fan-subtasks",
+        },
+        headers={"x-tenant-id": "t-e2e"},
+    )
+    assert res.status_code == 200, res.text
+    data = res.json()
+
+    assert [a["task"] for a in data["agents"]] == subtasks
+    # Distinct tasks must not cost the shared prefix its cacheability.
+    assert len([a for a in data["agents"] if a.get("pilot_role") == "pilot"]) == 1
+
+
+def test_fanout_cycles_subtasks_when_there_are_more_agents_than_tasks(client):
+    res = client.post(
+        "/demo/fanout",
+        json={
+            "prompt": "unused",
+            "shared_context": BIG_CONTEXT,
+            "agents": 4,
+            "subtasks": ["A", "B"],
+            "session_id": "fan-cycle",
+        },
+        headers={"x-tenant-id": "t-e2e"},
+    )
+    assert [a["task"] for a in res.json()["agents"]] == ["A", "B", "A", "B"]
+
+
 def test_fanout_without_the_pilot_pays_repeatedly(client):
     """Turning the pilot off is the status quo every other gateway ships."""
     with_pilot = client.post(

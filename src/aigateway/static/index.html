@@ -458,6 +458,16 @@ details summary{cursor:pointer;font-size:12px;color:var(--text-secondary)}
             <div><label for="pilotOn">Cache pilot</label><select id="pilotOn">
               <option value="true">enabled</option><option value="false">disabled</option></select></div>
           </div>
+          <label for="fanTasks" style="margin-top:10px">Per-agent tasks — one per line</label>
+          <textarea id="fanTasks" style="min-height:92px">Check the retry loop for duplicate-capture risk.
+Check whether the idempotency key is enforced in the database or only in code.
+Check the ordering assumptions between capture and refund.
+Check what happens on a read timeout mid-capture.
+Check the ledger entries this path writes.
+Check the tests: would they fail without the fix?</textarea>
+          <div class="hint">Every agent shares the same prefix from tab 1 — that is what makes
+            the cache shareable — but each gets its own task, so the six answers are worth
+            comparing. Leave this empty to send all agents the identical prompt.</div>
           <div class="row" style="margin-top:12px"><button class="primary" id="fanBtn">Run fan-out</button></div>
           <div class="hint">Run enabled, then disabled, and compare total writes.</div>
           <div id="fanResult" style="margin-top:12px"></div>
@@ -1042,7 +1052,9 @@ $("fanBtn").onclick = async () => {
       method:"POST", headers:{ "content-type":"application/json", "x-tenant-id":"demo" },
       body: JSON.stringify({ prompt:$("prompt").value, shared_context:$("context").value,
         agents: Math.max(1, Math.min(12, parseInt($("agents").value)||4)),
+        subtasks: $("fanTasks").value.split("\n").map(s => s.trim()).filter(Boolean),
         session_id:($("session").value||"demo-1")+"-fanout",
+        max_tokens: parseInt($("maxTokens").value) || 4000,
         pilot_enabled: $("pilotOn").value === "true" }) });
     const d = await res.json();
     if (!res.ok) throw new Error(d?.error?.message || "fan-out failed");
@@ -1061,28 +1073,50 @@ $("fanBtn").onclick = async () => {
          is no cache to share — not because caching is broken. Paste a few paragraphs
          into <i>Shared context</i> on tab 1 and re-run.</div></div>`;
 
-    $("fanResult").innerHTML = cacheNote + `<div class="tiles" style="margin-bottom:10px">
+    // A prompt cache belongs to one model. When sub-agents classify differently
+    // and land on different models, each model needs its own pilot and its own
+    // cold write — which looks like a broken pilot and is not. Say which.
+    const byModel = {};
+    d.agents.forEach(a => { if (a.model) (byModel[a.model] ||= []).push(a); });
+    const models = Object.keys(byModel);
+    const splitNote = models.length > 1
+      ? `<div class="verdict warn" style="margin-bottom:10px"><span class="vi">!</span><div>
+           <b>${models.length} cold writes, not one.</b> These agents routed to
+           ${models.map(m => `<b>${esc(m)}</b> (${byModel[m].length})`).join(" and ")}
+           — their subtasks classified into different tiers. A prompt cache belongs to
+           one model, so each one needs its own pilot and pays its own write. The pilot
+           is working; the fan-out is split. Pin <i>Intent hint</i> on tab 1 to hold every
+           agent on one model and share a single cache.</div></div>`
+      : "";
+
+    $("fanResult").innerHTML = cacheNote + splitNote + `<div class="tiles" style="margin-bottom:10px">
       <div class="tile"><div class="k">Total cost</div><div class="v">${money(d.total_cost_usd)}</div></div>
       <div class="tile"><div class="k">Cache reads</div><div class="v">${readers}/${d.agents.length}</div></div>
       <div class="tile"><div class="k">Failed quality</div><div class="v">${bad}/${d.agents.length}</div></div>
       <div class="tile"><div class="k">Wall clock</div><div class="v">${d.wall_clock_ms}<small> ms</small></div></div>
       </div>
+      <div class="wt" style="margin:14px 0 7px">What each agent came back with</div>
       ${d.agents.map(a => a.error
-        ? `<div class="reason err" style="margin-bottom:8px">Agent ${a.agent}: ${esc(a.error)}</div>`
-        : `<details style="border:1px solid var(--border);border-radius:8px;padding:9px 11px;
-              margin-bottom:8px;background:var(--page)">
-             <summary style="color:var(--text-primary);font-size:13px">
+        ? `<div class="reason err" style="margin-bottom:8px"><b>Agent ${a.agent}</b>
+             ${a.task ? `— ${esc(a.task)}<br>` : ""}${esc(a.error)}</div>`
+        : `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;
+              margin-bottom:9px;background:var(--page)">
+             <div style="color:var(--text-primary);font-size:13px;margin-bottom:6px">
                <b>Agent ${a.agent}</b> · ${esc(a.model)} ·
                ${a.pilot_role==="pilot"?"✎ pilot":a.cache_read_tokens?"✓ reader":"○ cold"} ·
                ${money(a.cost_usd)} · ${a.latency_ms}ms ·
                <span style="color:var(--${a.quality==="pass"?"success-text":a.quality==="fail"?"critical":"warning"})">
                  ${a.quality==="pass"?"✓":a.quality==="fail"?"✗":"!"} ${a.quality || "—"}</span>
-             </summary>
+             </div>
+             ${a.task ? `<div class="hint" style="margin-bottom:6px">
+                 <b>Asked:</b> ${esc(a.task)}</div>` : ""}
              ${a.quality_failures.length
-               ? `<div class="reason err" style="margin-top:8px">${a.quality_failures.map(esc).join("<br>")}</div>`
+               ? `<div class="reason err" style="margin-bottom:6px">${a.quality_failures.map(esc).join("<br>")}</div>`
                : ""}
-             <div class="answer" style="margin-top:8px;max-height:180px">${esc(a.answer || "(empty)")}</div>
-           </details>`).join("")}
+             <div class="answer" style="max-height:260px;overflow:auto">${
+               a.answer ? esc(a.answer)
+                        : "(empty — see the quality check above)"}</div>
+           </div>`).join("")}
       <div class="hint">Click an agent to read its answer. Cache read
         ${d.total_cache_read_tokens.toLocaleString()} tok · written
         ${d.total_cache_write_tokens.toLocaleString()} tok. On OpenAI there is no separate

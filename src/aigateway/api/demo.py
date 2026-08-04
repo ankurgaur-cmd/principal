@@ -17,7 +17,7 @@ import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..catalog import CATALOG
 from ..errors import GatewayError
@@ -35,9 +35,12 @@ class FanoutRequest(BaseModel):
     session_id: str = "fanout"
     intent: str | None = None
     pilot_enabled: bool = True
-    # Above the reasoning floor. At 300 the reasoning consumes the whole
-    # budget and every sub-agent returns an empty answer — which reads as a
-    # broken fan-out and is really a starved output budget.
+    # Optional per-agent tasks. Real fan-out gives each sub-agent a different
+    # slice of the work against the same shared prefix; sending all N the
+    # identical prompt produces N near-identical answers, which makes the
+    # per-agent output impossible to judge even once you can see it. When this
+    # is empty the agents fall back to the single `prompt`.
+    subtasks: list[str] = Field(default_factory=list)
     # Sub-agents are reasoning models too, and hidden reasoning bills against
     # this same budget. At 800 every agent returned an empty answer and the
     # dashboard showed six rows of metrics with nothing in them. Measured floor
@@ -61,13 +64,22 @@ async def fanout(body: FanoutRequest, request: Request) -> dict:
     original = pipeline.pilot.set_enabled(body.pilot_enabled)
     await app.state.store.delete(f"session:{body.session_id}:model")
 
+    def task_for(index: int) -> str:
+        """What sub-agent `index` is actually asked to do.
+
+        The shared prefix stays byte-identical across agents either way — that
+        is what makes the cache shareable — so giving each agent its own task
+        costs nothing and makes the parallel output worth reading.
+        """
+        if body.subtasks:
+            return body.subtasks[index % len(body.subtasks)]
+        return f"{body.prompt}\n\n(sub-agent #{index + 1})"
+
     def build(index: int) -> ChatCompletionRequest:
         messages = []
         if body.shared_context:
             messages.append(ChatMessage(role="system", content=body.shared_context))
-        messages.append(
-            ChatMessage(role="user", content=f"{body.prompt}\n\n(sub-agent #{index + 1})")
-        )
+        messages.append(ChatMessage(role="user", content=task_for(index)))
         return ChatCompletionRequest(
             model="auto",
             messages=messages,
@@ -90,10 +102,12 @@ async def fanout(body: FanoutRequest, request: Request) -> dict:
     total_write = 0
     for index, result in enumerate(results):
         if isinstance(result, GatewayError):
-            agents.append({"agent": index + 1, "error": str(result.detail)})
+            agents.append({"agent": index + 1, "task": task_for(index),
+                           "error": str(result.detail)})
             continue
         if isinstance(result, BaseException):
-            agents.append({"agent": index + 1, "error": repr(result)})
+            agents.append({"agent": index + 1, "task": task_for(index),
+                           "error": repr(result)})
             continue
         meta = result.x_gateway
         total_cost += meta.actual_cost_usd
@@ -102,6 +116,8 @@ async def fanout(body: FanoutRequest, request: Request) -> dict:
         agents.append(
             {
                 "agent": index + 1,
+                # An answer you cannot see the question for is not reviewable.
+                "task": task_for(index),
                 "model": meta.chosen_model,
                 "provider": meta.provider,
                 "tier": meta.tier,
@@ -221,7 +237,7 @@ async def fanin(body: FaninRequest, request: Request) -> dict:
                 "cached_tokens": meta.cache_read_tokens,
                 "hosts": meta.trace.get("hosts_contacted", []),
                 "quality": meta.quality.get("verdict"),
-                "answer": text[:400],
+                "answer": text,
             }
         )
 
