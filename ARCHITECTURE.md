@@ -531,6 +531,58 @@ percentile rank ship alongside so the skew is visible rather than implied. Movin
 the bands to log-space or to fixed percentiles would be the principled fix and is
 an open question, not a decision.
 
+### D26 — Effort-adjusted routing: price the task, not the call
+**Context.** D-era reputation adjusts a model's price by `1/success_rate`, on the
+principle that a model succeeding a fraction `s` of the time needs `1/s` attempts
+so its honest cost is `cost/s`. That is already an effort measure — it just counts
+one kind of effort. A task that "succeeded" after four turns, two truncated
+drafts and an escalation to a bigger model did not cost one call, and the sticker
+price of the winning call is the least interesting number in that story.
+
+**Decision.** `routing/effort.py` scores extra work in the same unit — **extra
+ideal calls** — and the two factors multiply:
+
+    multiplier = (1 + mean_extra_effort) / success_rate
+
+With no effort evidence the left factor is exactly 1.0, so enabling this changes
+nothing until there is something to change it with.
+
+The signal table is **open**: each row is data (name, weight, attribution rule,
+function), so adding "the user re-asked" later means appending a row, not editing
+the scorer. Six signals are measured today from the request itself — retries,
+wasted call, truncation, token overrun, invisible reasoning work, latency
+overrun. Five need a human in the loop and are registered but inert, returning
+"no opinion" until an orchestrator reports them via `POST /admin/effort`:
+turns-to-goal, re-ask, rejection, manual escalation, human edit distance.
+
+**Two hazards, both of which make routing worse if ignored.**
+
+*Confounding.* Hard work legitimately takes more turns and more tokens. Scoring
+raw effort punishes whichever model gets handed the hard problems — it would
+route hard tasks to models that have never seen one. Every signal is normalised
+against the same intent's observed norm, never an absolute threshold. Same lesson
+as D25: only compare like with like.
+
+*Attribution.* Session effort spans requests that different models served.
+Blaming whoever answered last is arbitrary, so signals declare `call` or
+`session` attribution, and anything that cannot be attributed honestly returns
+`None`.
+
+**Consequences.** "No data" and "no effort" are different claims and are kept
+distinct throughout — a signal without data is reported as *silent*, with what it
+is waiting for, rather than scoring zero. A model looking good because nobody
+measured it is the failure this avoids. Every score is itemised: an effort
+penalty that cannot be enumerated is indistinguishable from a grudge. Per-signal
+and total caps stop one catastrophic task exiling a model, and D-era mandatory
+exploration still applies, so a model that improves can climb back.
+
+**Open questions.** The weights on the measured signals are reasoned, not
+calibrated — truncation at half a call and escalation at 1.5 are arguments, not
+measurements. The replay harness is the right place to fit them against
+historical traffic, and until that happens they should be treated as a starting
+position. Proportional session attribution is specified but not yet implemented:
+a reported session signal is currently charged to the model named in the report.
+
 ### D21 — A streamed stage trace for the console
 **Context.** A routing decision that appears all at once, after the fact, is
 indistinguishable from a mock. Animating it on a timer would be a lie.

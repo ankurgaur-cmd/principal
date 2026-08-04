@@ -24,7 +24,18 @@ Below ``min_samples`` observations the multiplier is exactly 1.0. Penalising a
 model for one bad response would be superstition, and it would make routing
 depend on the order requests happened to arrive in.
 
-**4. Exploration is mandatory, not optional.**
+**4. Effort composes with retries; it does not compete with them.**
+``1/s`` counts one kind of effort: how many attempts to get a usable answer. It
+misses everything that made a "successful" task expensive — a fallback, a
+truncated first draft, four turns, an escalation. ``effort.EffortModel`` scores
+those in the same unit (extra ideal calls) and the two multiply:
+
+    multiplier = (1 + mean_extra_effort) / success_rate
+
+With no effort signals recorded the left factor is exactly 1.0, so this changes
+nothing until there is evidence to change it.
+
+**5. Exploration is mandatory, not optional.**
 A model penalised out of contention never gets traffic, so it never gets new
 observations, so it can never recover — its reputation is frozen at its worst
 moment. A fixed fraction of requests therefore ignore the penalty entirely, which
@@ -41,6 +52,8 @@ import logging
 import random
 from collections import defaultdict, deque
 
+from .effort import EffortModel, EffortObservation, Norms
+
 log = logging.getLogger(__name__)
 
 
@@ -53,6 +66,7 @@ class Reputation:
         max_penalty: float = 4.0,
         exploration_rate: float = 0.05,
         rng: random.Random | None = None,
+        effort: EffortModel | None = None,
     ):
         self._window = window
         self._min_samples = min_samples
@@ -63,12 +77,71 @@ class Reputation:
         self._outcomes: dict[tuple[str, str], deque[bool]] = defaultdict(
             lambda: deque(maxlen=window)
         )
+        # Extra effort, in ideal-calls, alongside the binary outcome.
+        self.effort = effort or EffortModel()
+        self._effort: dict[tuple[str, str], deque[float]] = defaultdict(
+            lambda: deque(maxlen=window)
+        )
+        # Per-intent norms, so effort is judged against comparable work rather
+        # than an absolute threshold that would punish whichever model gets the
+        # hard problems.
+        self._norm_tokens: dict[str, deque[int]] = defaultdict(lambda: deque(maxlen=window))
+        self._norm_latency: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=window))
+        self._norm_turns: dict[str, deque[int]] = defaultdict(lambda: deque(maxlen=window))
 
     # -- observation --------------------------------------------------------
     def record(self, model_key: str, intent: str, ok: bool) -> None:
         self._outcomes[(model_key, intent)].append(ok)
         if not ok:
             log.info("quality miss recorded: %s on intent '%s'", model_key, intent)
+
+    def norms_for(self, intent: str) -> Norms:
+        """What this kind of work normally costs.
+
+        Returns empty norms until an intent has history — signals that need a
+        norm then report "no opinion" rather than treating an unknown as zero.
+        """
+        tokens = self._norm_tokens.get(intent) or ()
+        latency = self._norm_latency.get(intent) or ()
+        turns = self._norm_turns.get(intent) or ()
+        return Norms(
+            completion_tokens=sum(tokens) / len(tokens) if tokens else None,
+            latency_ms=sum(latency) / len(latency) if latency else None,
+            turns=sum(turns) / len(turns) if turns else None,
+            samples=len(tokens),
+        )
+
+    def record_effort(self, obs: EffortObservation) -> dict:
+        """Score one observation and fold it in. Returns the itemised breakdown.
+
+        The norms are updated *after* scoring, for the same reason the latency
+        baselines are: a sample judged against a norm it has already moved
+        drags the norm towards itself and looks less exceptional than it is.
+        """
+        scored = self.effort.score(obs, self.norms_for(obs.intent))
+        self._effort[(obs.model_key, obs.intent)].append(scored["extra_effort"])
+
+        if obs.completion_tokens:
+            self._norm_tokens[obs.intent].append(obs.completion_tokens)
+        if obs.latency_ms:
+            self._norm_latency[obs.intent].append(obs.latency_ms)
+        if obs.turns_to_goal:
+            self._norm_turns[obs.intent].append(obs.turns_to_goal)
+
+        if scored["extra_effort"] > 0:
+            log.info(
+                "effort recorded: %s on '%s' cost %.2f extra calls (%s)",
+                obs.model_key, obs.intent, scored["extra_effort"],
+                ", ".join(c["signal"] for c in scored["contributions"]),
+            )
+        return scored
+
+    def mean_effort(self, model_key: str, intent: str) -> float:
+        """Mean extra effort, or 0.0 without enough evidence to say."""
+        seen = self._effort.get((model_key, intent))
+        if not seen or len(seen) < self._min_samples:
+            return 0.0
+        return sum(seen) / len(seen)
 
     # -- scoring ------------------------------------------------------------
     def sample_count(self, model_key: str, intent: str) -> int:
@@ -82,15 +155,24 @@ class Reputation:
         return sum(outcomes) / len(outcomes)
 
     def multiplier(self, model_key: str, intent: str) -> float:
-        """Cost multiplier from observed quality. 1.0 means no adjustment."""
+        """Cost multiplier from observed quality and effort. 1.0 = no adjustment.
+
+        Two independent factors that multiply because they compound: retries
+        repeat the whole task, and effort is what each attempt costs beyond one
+        clean call. Either alone can be 1.0, and with no evidence both are.
+        """
+        effort_factor = 1.0 + self.mean_effort(model_key, intent)
+
         rate = self.success_rate(model_key, intent)
         if rate is None:
-            return 1.0
-        if rate <= 0:
+            retry_factor = 1.0
+        elif rate <= 0:
             return self._max_penalty
-        # Expected attempts to get one usable answer, capped so a bad patch
-        # cannot exile a model permanently.
-        return min(1.0 / rate, self._max_penalty)
+        else:
+            retry_factor = 1.0 / rate
+
+        # Capped so a bad patch cannot exile a model permanently.
+        return min(effort_factor * retry_factor, self._max_penalty)
 
     def should_explore(self) -> bool:
         """Whether to ignore reputation for this request.
@@ -114,6 +196,8 @@ class Reputation:
                     "failures": sum(1 for o in outcomes if not o),
                     "success_rate": round(rate, 3) if rate is not None else None,
                     "multiplier": round(self.multiplier(model_key, intent), 3),
+                    "mean_extra_effort": round(self.mean_effort(model_key, intent), 3),
+                    "effort_samples": len(self._effort.get((model_key, intent), ())),
                     # Says plainly why a model is or is not being adjusted.
                     "status": (
                         "insufficient evidence"
@@ -129,3 +213,7 @@ class Reputation:
 
     def reset(self) -> None:
         self._outcomes.clear()
+        self._effort.clear()
+        self._norm_tokens.clear()
+        self._norm_latency.clear()
+        self._norm_turns.clear()

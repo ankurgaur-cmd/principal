@@ -8,8 +8,9 @@ It is how you sanity-check a policy change before it touches traffic.
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from ..errors import GatewayError
 from ..pipeline import canonicalise
 from ..routing.policy import INTENT_POLICY
 from ..schemas import ChatCompletionRequest
@@ -59,6 +60,72 @@ async def fleet(request: Request, flow_limit: int = 25) -> dict:
     the durable history.
     """
     return request.app.state.fleet.snapshot(flow_limit=flow_limit)
+
+
+class EffortReport(BaseModel):
+    """Effort only the caller can see.
+
+    The gateway measures what happened inside one call. It cannot know that the
+    user asked the same thing three different ways, gave up, or rewrote the
+    answer before using it — and those are the expensive parts. An orchestrator
+    that reports them makes the router aware of costs it is otherwise blind to.
+    """
+
+    model: str
+    intent: str
+    turns_to_goal: int | None = None
+    user_reasked: bool | None = None
+    user_rejected: bool | None = None
+    manual_escalation: bool | None = None
+    edit_distance: float | None = Field(default=None, ge=0.0, le=1.0)
+    extras: dict[str, float] = Field(default_factory=dict)
+
+
+@router.post("/effort")
+async def report_effort(body: EffortReport, request: Request) -> dict:
+    """Report caller-side effort for work already served.
+
+    Returns the itemised score so the caller can see exactly what its report
+    was worth — an effort penalty that cannot be itemised is indistinguishable
+    from a grudge.
+    """
+    reputation = request.app.state.reputation
+    if reputation is None:
+        raise GatewayError(503, "reputation tracking is disabled", code="no_reputation")
+
+    from ..routing.effort import EffortObservation
+
+    scored = reputation.record_effort(
+        EffortObservation(
+            model_key=body.model,
+            intent=body.intent,
+            turns_to_goal=body.turns_to_goal,
+            user_reasked=body.user_reasked,
+            user_rejected=body.user_rejected,
+            manual_escalation=body.manual_escalation,
+            edit_distance=body.edit_distance,
+            extras=body.extras,
+        )
+    )
+    return {
+        "recorded": True,
+        "scored": scored,
+        "multiplier_now": round(reputation.multiplier(body.model, body.intent), 3),
+    }
+
+
+@router.get("/effort/signals")
+async def effort_signals(request: Request) -> dict:
+    """The open table: every signal, its weight, and what it is waiting on.
+
+    Published because a routing penalty nobody can enumerate is not auditable.
+    Signals marked `awaiting data` are registered and inert — an empty column
+    that names what is missing beats a signal that quietly is not there.
+    """
+    reputation = request.app.state.reputation
+    if reputation is None:
+        return {"signals": [], "enabled": False}
+    return {"signals": reputation.effort.table(), "enabled": True}
 
 
 @router.get("/baselines")

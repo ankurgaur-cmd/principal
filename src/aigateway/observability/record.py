@@ -66,6 +66,8 @@ class RequestRecord:
     actual_cost_usd: float = 0.0
     cache_savings_usd: float = 0.0
 
+    extra_effort: float = 0.0
+
     latency_ttft_ms: int = 0
     latency_total_ms: int = 0
 

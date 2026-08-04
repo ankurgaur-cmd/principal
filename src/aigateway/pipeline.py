@@ -43,6 +43,7 @@ from .quality import (
     judge,
 )
 from .routing import IntentClassifier, Router, explain
+from .routing.effort import EffortObservation
 from .schemas import (
     CanonicalRequest,
     ChatCompletionChoice,
@@ -54,7 +55,7 @@ from .schemas import (
     ToolDef,
     Usage,
 )
-from .tokens import estimate_request_tokens
+from .tokens import estimate_request_tokens, estimate_tokens
 
 log = logging.getLogger(__name__)
 
@@ -492,6 +493,29 @@ class GatewayPipeline:
         # told so by configuration.
         if self._reputation:
             self._reputation.record(model_used.key, intent.intent, report.routing_ok)
+            # What this answer actually cost beyond one clean call. Everything
+            # here is measured on this request; the signals that need a human
+            # in the loop arrive later via POST /admin/effort.
+            text = response.text or ""
+            effort = self._reputation.record_effort(
+                EffortObservation(
+                    model_key=model_used.key,
+                    intent=intent.intent,
+                    usable=report.routing_ok,
+                    attempts=len(chain) + 1,
+                    completion_tokens=response.usage.completion_tokens,
+                    visible_tokens=estimate_tokens(text),
+                    truncated=response.finish_reason == "length",
+                    empty=not text.strip() and not response.tool_calls,
+                    # Upstream time, not total request time: the model is
+                    # answerable for its own call, not for the gateway's
+                    # overhead or the cache pilot's wait.
+                    latency_ms=float(record.upstream_ms),
+                    cost_usd=priced.total_usd,
+                )
+            )
+            record.extra_effort = effort["extra_effort"]
+            await stage("effort", effort)
         record.quality_verdict = report.verdict
         record.quality_failures = [c.id for c in report.failures]
         record.routing_ok = report.routing_ok
