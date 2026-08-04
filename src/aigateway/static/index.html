@@ -105,6 +105,66 @@ button.sm{padding:4px 10px;font-size:12px}
 .conn path{stroke:var(--baseline);stroke-width:2;fill:none;transition:stroke .2s}
 .conn.lit path{stroke:var(--series-1)}
 @media (max-width:900px){.conn{transform:rotate(90deg);min-height:18px}}
+/* ---- latency banding -------------------------------------------------
+   Each stage is coloured against its own learned baseline, never a global
+   one. `learning` is deliberately neutral: before there is enough data we
+   say we do not know rather than guessing in colour. */
+.node{position:relative;overflow:hidden}
+.node::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:transparent;transition:background .25s}
+.node.band-fast::before{background:var(--good)}
+.node.band-normal::before{background:var(--series-1)}
+.node.band-warn::before{background:var(--warning)}
+.node.band-critical::before{background:var(--critical)}
+.node.band-learning::before{background:var(--baseline)}
+.node.band-fast{background:color-mix(in srgb,var(--good) 6%,var(--card))}
+.node.band-warn{background:color-mix(in srgb,var(--warning) 9%,var(--card))}
+.node.band-critical{background:color-mix(in srgb,var(--critical) 9%,var(--card))}
+.node.band-critical{border-color:color-mix(in srgb,var(--critical) 45%,var(--border))}
+.node.band-warn{border-color:color-mix(in srgb,var(--warning) 45%,var(--border))}
+
+/* Measured against expected. The track's midpoint is the baseline mean, so a
+   fill past halfway is literally "slower than usual" without reading a number. */
+.gauge{height:3px;border-radius:2px;background:var(--grid);margin-top:7px;overflow:hidden;
+  position:relative}
+.gauge i{display:block;height:100%;width:0;border-radius:2px;background:var(--series-1);
+  transition:width .45s cubic-bezier(.22,1,.36,1)}
+.gauge.band-fast i{background:var(--good)} .gauge.band-warn i{background:var(--warning)}
+.gauge.band-critical i{background:var(--critical)}
+.gauge.band-learning i{background:var(--baseline)}
+.gauge::after{content:"";position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;
+  background:var(--text-muted);opacity:.45}
+.spark{display:block;width:100%;height:16px;margin-top:5px;overflow:visible}
+.spark path{fill:none;stroke:var(--baseline);stroke-width:1.5;stroke-linejoin:round}
+.spark .now{stroke:none}
+.band-note{font-size:10.5px;font-family:var(--mono);margin-top:5px;color:var(--text-muted);
+  line-height:1.4}
+.node.band-warn .band-note{color:var(--warning)}
+.node.band-critical .band-note{color:var(--critical)}
+.node.band-fast .band-note{color:var(--success-text)}
+.pb{display:inline-block;margin-left:5px;animation:pop .5s ease}
+@keyframes pop{0%{transform:scale(.4);opacity:0}60%{transform:scale(1.25)}100%{transform:none;opacity:1}}
+
+/* The connector carries the same verdict, and its dashes travel: fast stages
+   stream, slow ones crawl. Motion encodes the same fact as the colour so it
+   survives a colour-vision difference. */
+.conn path{stroke:var(--baseline);stroke-width:2;fill:none;
+  transition:stroke .25s,stroke-width .25s}
+.conn.band-fast path{stroke:var(--good)} .conn.band-normal path{stroke:var(--series-1)}
+.conn.band-warn path{stroke:var(--warning);stroke-width:2.5}
+.conn.band-critical path{stroke:var(--critical);stroke-width:3}
+.conn.band-learning path{stroke:var(--baseline)}
+.conn.flowing path:first-child{stroke-dasharray:4 4;animation:flow linear infinite}
+@keyframes flow{to{stroke-dashoffset:-16}}
+@media (prefers-reduced-motion:reduce){
+  .conn.flowing path:first-child{animation:none;stroke-dasharray:none}
+  .pb{animation:none}
+  .gauge i{transition:none}
+}
+.band-legend{display:flex;gap:13px;flex-wrap:wrap;font-size:11.5px;
+  color:var(--text-secondary);margin-top:11px;align-items:center}
+.band-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;
+  margin-right:5px;vertical-align:-1px}
 .lamps{display:flex;gap:4px;margin-top:6px}
 .lamp{flex:1;height:4px;border-radius:2px;background:var(--grid)}
 .lamp.hit{background:var(--series-1)} .lamp.skipped{background:var(--baseline)}
@@ -325,21 +385,42 @@ details summary{cursor:pointer;font-size:12px;color:var(--text-secondary)}
         <h2>Pipeline — live</h2>
         <div class="flow">
           <div class="node pending" id="s1"><div class="n">1 · Query</div><div class="t"></div>
-            <div class="v">—</div><div class="s"></div></div>
+            <div class="v">—</div><div class="s"></div>
+            <div class="gauge"><i></i></div><svg class="spark" viewBox="0 0 100 16"
+              preserveAspectRatio="none"></svg><div class="band-note"></div></div>
           <div class="conn" id="c1"><svg viewBox="0 0 22 12"><path d="M0 6 H16 M12 2 L16 6 L12 10"/></svg></div>
           <div class="node pending" id="s2"><div class="n">2 · Intent classifier</div><div class="t"></div>
             <div class="v">—</div>
             <div class="lamps" title="L0 declared · L1 rules · L2 embeddings · L3 small model">
               <div class="lamp" id="l0"></div><div class="lamp" id="l1"></div>
               <div class="lamp" id="l2"></div><div class="lamp" id="l3"></div></div>
-            <div class="s"></div></div>
+            <div class="s"></div>
+            <div class="gauge"><i></i></div><svg class="spark" viewBox="0 0 100 16"
+              preserveAspectRatio="none"></svg><div class="band-note"></div></div>
           <div class="conn" id="c2"><svg viewBox="0 0 22 12"><path d="M0 6 H16 M12 2 L16 6 L12 10"/></svg></div>
           <div class="node pending" id="s3"><div class="n">3 · Router</div><div class="t"></div>
-            <div class="v">—</div><div class="s"></div></div>
+            <div class="v">—</div><div class="s"></div>
+            <div class="gauge"><i></i></div><svg class="spark" viewBox="0 0 100 16"
+              preserveAspectRatio="none"></svg><div class="band-note"></div></div>
           <div class="conn" id="c3"><svg viewBox="0 0 22 12"><path d="M0 6 H16 M12 2 L16 6 L12 10"/></svg></div>
           <div class="node pending" id="s4"><div class="n">4 · LLM server</div><div class="t"></div>
-            <div class="v">—</div><div class="s"></div></div>
+            <div class="v">—</div><div class="s"></div>
+            <div class="gauge"><i></i></div><svg class="spark" viewBox="0 0 100 16"
+              preserveAspectRatio="none"></svg><div class="band-note"></div></div>
         </div>
+        <div class="band-legend">
+          <span>Speed vs this stage's own baseline:</span>
+          <span><i style="background:var(--good)"></i>faster than usual</span>
+          <span><i style="background:var(--series-1)"></i>within 1σ</span>
+          <span><i style="background:var(--warning)"></i>over 1σ</span>
+          <span><i style="background:var(--critical)"></i>over 2σ</span>
+          <span><i style="background:var(--baseline)"></i>still learning</span>
+        </div>
+        <div class="hint">Every stage is compared only against its own history —
+          the upstream call separately per model <i>and</i> per cache state, because a cold
+          write is legitimately slower than a warm read. Pooling them would paint every cold
+          request red. Hover any stage for its mean, σ, p50/p95 and sample count, or read
+          <code>/admin/baselines</code> for the numbers behind every colour.</div>
         <div id="reason" class="reason" style="margin-top:14px">Send a query to watch it routed.</div>
       </div>
 
@@ -501,6 +582,30 @@ Review prompt caching for correctness risks and race conditions</textarea>
   <!-- ========== TAB 3 ========== -->
   <div class="panel" id="tab-fleet">
     <div class="card">
+      <h2>Latency baselines — what the colours mean</h2>
+      <div class="hint" style="margin-top:0">Every band on the pipeline is measured against
+        one of these segments. A colour you cannot check is a colour you have to trust
+        blindly, so the mean, σ, percentiles, sample count and the exact ms threshold for
+        <b>warn</b> and <b>critical</b> are all published here and at
+        <code>/admin/baselines</code>. Segments under the sample floor report
+        <i>learning</i> and are drawn neutral — mean and σ over a handful of points are
+        noise, and colouring them would teach you to ignore the colour.</div>
+      <div id="baseSummary" class="hint"></div>
+      <div class="scroll" style="margin-top:10px"><table>
+        <thead><tr><th>Segment</th><th class="num">n</th><th class="num">mean</th>
+          <th class="num">σ</th><th class="num">p50</th><th class="num">p95</th>
+          <th class="num">best</th><th class="num">warn ≥</th><th class="num">critical ≥</th>
+          <th>State</th></tr></thead>
+        <tbody id="baseRows"><tr><td colspan="10" style="color:var(--text-muted)">
+          Send a few queries — baselines are learned from your own traffic.</td></tr></tbody>
+      </table></div>
+      <div class="hint">Latency is right-skewed, so “2σ” does not mean “the slowest 2.3%”
+        the way it would for a normal distribution — in practice it flags somewhat more.
+        The bands are still computed in σ because that is the agreed vocabulary; p50 and
+        p95 are shown beside the mean so the skew is visible rather than implied.</div>
+    </div>
+
+    <div class="card">
       <h2>Fleet — where your traffic goes</h2>
       <div id="fleetSummary" class="hint">No traffic yet this session.</div>
       <div class="wt" style="margin:16px 0 8px">By LLM server</div>
@@ -595,6 +700,12 @@ const $ = (id) => document.getElementById(id);
 const money = (v) => v >= 0.01 ? "$" + v.toFixed(4) : "$" + v.toFixed(6);
 const esc = (s) => String(s ?? "").replace(/[<>&]/g, c => ({ "<":"&lt;", ">":"&gt;", "&":"&amp;" }[c]));
 const TIERS = { light:"t-light", standard:"t-standard", heavy:"t-heavy" };
+/* Gateway-local stages run in microseconds; the upstream call runs in seconds.
+   One formatter for both, so a 0.04ms route and a 6,000ms call are both legible. */
+const ms = (v) => v == null ? "—"
+  : v >= 1000 ? (v/1000).toFixed(2) + "s"
+  : v >= 10   ? Math.round(v) + "ms"
+  : v.toFixed(2) + "ms";
 const CACHE_UI = {
   warm_read:{ icon:"✓", label:"Reusing cache" },
   cold_write:{ icon:"↑", label:"Building cache" },
@@ -755,11 +866,106 @@ function markActive(id) {
   const el = $(id); el.classList.remove("pending","done"); el.classList.add("active");
   const i = NODES.indexOf(id); if (i > 0) $(CONNS[i-1]).classList.add("lit");
 }
+
+/* Which stage event paints which node. The upstream call is the one people
+   actually watch, so it gets the connector into it banded on its own latency
+   rather than on wall-clock, which would include the cache pilot's wait. */
+const STAGE_NODE = { canonicalised:"s1", classified:"s2", routed:"s3", served:"s4" };
+const NODE_CONN = { s2:"c1", s3:"c2", s4:"c3" };
+function bandStage(stageName, ev) {
+  const node = STAGE_NODE[stageName]; if (!node || !ev.baseline) return;
+  applyBaseline(node, ev.baseline);
+  const conn = NODE_CONN[node];
+  if (conn) litConnector(conn, ev.baseline);
+}
+const BANDS = ["band-fast","band-normal","band-warn","band-critical","band-learning"];
+const BAND_ICON = { fast:"⚡", normal:"", warn:"▲", critical:"▲▲", learning:"…" };
+
+/* Colour one stage against its own baseline, and carry the same verdict onto
+   the arrow leading into it. Everything here is presentation of a verdict the
+   server computed — the page never decides what "slow" means, because a
+   threshold invented in the browser could not be checked against the data. */
+function applyBaseline(nodeId, b) {
+  const el = $(nodeId);
+  if (!el || !b) return;
+  const band = b.band || "learning";
+  el.classList.remove(...BANDS);
+  el.classList.add("band-" + band);
+
+  // Gauge: the midpoint tick is the baseline mean, so past halfway reads as
+  // "slower than usual" without anyone parsing a number.
+  const gauge = el.querySelector(".gauge"), fill = gauge?.querySelector("i");
+  if (fill) {
+    gauge.classList.remove(...BANDS); gauge.classList.add("band-" + band);
+    const ratio = b.expected_ms ? b.measured_ms / (b.expected_ms * 2) : 0.5;
+    fill.style.width = Math.max(2, Math.min(100, ratio * 100)).toFixed(1) + "%";
+  }
+
+  const note = el.querySelector(".band-note");
+  if (note) {
+    const icon = BAND_ICON[band] || "";
+    note.textContent = (icon ? icon + " " : "") + (b.note || "");
+    if (b.record && band !== "learning") {
+      const star = document.createElement("span");
+      star.className = "pb"; star.textContent = "★ fastest yet";
+      note.appendChild(star);
+    }
+  }
+
+  // The tooltip carries the evidence: you can check any colour against it.
+  el.title = b.source === "observed"
+    ? `${ms(b.measured_ms)} measured\nbaseline ${ms(b.expected_ms)} ± ${ms(b.stddev_ms)} `
+      + `over ${b.samples} samples\np50 ${ms(b.p50_ms)} · p95 ${ms(b.p95_ms)} · best ${ms(b.best_ms)}\n`
+      + `z = ${b.z} · faster than ${Math.round((b.rank ?? 0) * 100)}% of recent runs\n`
+      + `segment: ${b.segment}`
+    : `${ms(b.measured_ms)} measured\n${b.note}\nsegment: ${b.segment}`;
+
+  drawSpark(el, b);
+}
+
+/* A 16px history strip. Twelve runs is enough to see a trend and short enough
+   that it cannot be mistaken for a chart worth reading precisely. */
+const sparkHistory = {};
+function drawSpark(el, b) {
+  const svg = el.querySelector(".spark"); if (!svg) return;
+  const hist = (sparkHistory[el.id] ||= []);
+  hist.push(b.measured_ms); if (hist.length > 12) hist.shift();
+  if (hist.length < 2) { svg.innerHTML = ""; return; }
+
+  const max = Math.max(...hist, b.expected_ms || 0) || 1;
+  const pts = hist.map((v, i) =>
+    `${(i / (hist.length - 1) * 100).toFixed(1)},${(15 - (v / max) * 14).toFixed(1)}`);
+  const baselineY = b.expected_ms ? (15 - (b.expected_ms / max) * 14).toFixed(1) : null;
+  svg.innerHTML =
+    (baselineY ? `<path d="M0 ${baselineY} H100" stroke="var(--text-muted)"
+        stroke-dasharray="2 3" opacity=".5"/>` : "")
+    + `<path d="M${pts.join(" L")}"/>`;
+}
+
+/* Dash speed reflects the verdict: fast stages stream, slow ones crawl. Motion
+   carries the same fact as the colour, so it survives a colour-vision
+   difference and reduced-motion turns it off without losing information. */
+function litConnector(connId, b) {
+  const el = $(connId); if (!el) return;
+  el.classList.add("lit","flowing");
+  el.classList.remove(...BANDS);
+  el.classList.add("band-" + (b?.band || "learning"));
+  const speed = { fast:.5, normal:.9, warn:1.8, critical:3.2, learning:1.2 }[b?.band] || 1.2;
+  const path = el.querySelector("path");
+  if (path) path.style.animationDuration = speed + "s";
+}
+
 function resetFlow() {
   NODES.forEach(id => { const el = $(id); el.className = "node pending";
     el.querySelector(".v").textContent = "—"; el.querySelector(".s").textContent = "";
-    el.querySelector(".t").textContent = ""; });
-  CONNS.forEach(id => $(id).classList.remove("lit"));
+    el.querySelector(".t").textContent = ""; el.title = "";
+    const note = el.querySelector(".band-note"); if (note) note.textContent = "";
+    const fill = el.querySelector(".gauge i"); if (fill) fill.style.width = "0";
+    // The sparkline survives a reset on purpose: it is the run-to-run history,
+    // which is the whole point of it.
+  });
+  CONNS.forEach(id => { const el = $(id);
+    el.classList.remove("lit","flowing",...BANDS); });
   ["l0","l1","l2","l3"].forEach(id => $(id).className = "lamp");
 }
 const LAYER_INDEX = { declared:0, rules:1, embedding:2, llm:3, "llm-cached":3, default:3 };
@@ -923,7 +1129,7 @@ $("sendBtn").onclick = async () => {
     NODES.forEach(id => { if ($(id).classList.contains("active")) setNode(id,{state:"err"}); });
   } finally {
     btn.disabled = false; btn.textContent = "Send";
-    refreshPool(lastChosen); refreshFleet(); refreshReputation();
+    refreshPool(lastChosen); refreshFleet(); refreshReputation(); refreshBaselines();
   }
 };
 
@@ -939,6 +1145,9 @@ async function consumeTrace(res) {
       const line = f.split("\n").find(l => l.startsWith("data: ")); if (!line) continue;
       const raw = line.slice(6); if (raw === "[DONE]") return;
       const ev = JSON.parse(raw);
+      /* Band every stage that carries a verdict, before the stage-specific
+         renderer runs — so a colour still lands even if that renderer throws. */
+      try { bandStage(ev.stage, ev); } catch (e) { console.error("banding", e); }
       /* One panel failing to render must never cost you the answer. These
          stages arrive in order and the response is the last of them, so an
          exception thrown while drawing an earlier panel used to abort the
@@ -1332,9 +1541,36 @@ function updateCtxSize() {
 }
 $("context").oninput = updateCtxSize; $("prompt").oninput = updateCtxSize;
 
+async function refreshBaselines() {
+  try {
+    const b = await (await fetch("/admin/baselines")).json();
+    const segs = b.segments || [];
+    $("baseSummary").innerHTML = `${segs.length} segment(s) learned · confident after
+      <b>${b.min_samples}</b> samples · rolling window <b>${b.window}</b> ·
+      warn above <b>${b.warn_sigma}σ</b>, critical above <b>${b.critical_sigma}σ</b>.`;
+    if (!segs.length) return;
+    $("baseRows").innerHTML = segs.map(s => `<tr>
+      <td><code>${esc(s.key)}</code></td>
+      <td class="num">${s.samples}</td>
+      <td class="num">${ms(s.mean_ms)}</td>
+      <td class="num">${ms(s.stddev_ms)}</td>
+      <td class="num">${ms(s.p50_ms)}</td>
+      <td class="num">${ms(s.p95_ms)}</td>
+      <td class="num">${ms(s.best_ms)}</td>
+      <td class="num" style="color:var(--warning)">${s.warn_above_ms != null
+        ? ms(s.warn_above_ms) : (s.degenerate ? "any change" : "—")}</td>
+      <td class="num" style="color:var(--critical)">${s.critical_above_ms != null
+        ? ms(s.critical_above_ms) : (s.degenerate ? "any change" : "—")}</td>
+      <td>${s.confident
+        ? '<span style="color:var(--success-text)">confident</span>'
+        : `<span style="color:var(--text-muted)">learning (${s.samples}/${b.min_samples})</span>`}</td>
+    </tr>`).join("");
+  } catch (e) { console.error("baselines", e); }
+}
+
 async function boot() {
   await refreshHealth(); await refreshCreds(); await refreshPool();
-  await refreshFleet(); await refreshReputation();
+  await refreshFleet(); await refreshReputation(); await refreshBaselines();
   try {
     const p = await (await fetch("/admin/policy")).json();
     p.intents.forEach(i => { const o = document.createElement("option");

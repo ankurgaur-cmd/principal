@@ -173,6 +173,97 @@ def test_reset_forces_a_cold_route(client):
     assert res.json()["reset"] is True
 
 
+def _stages(client, **kw):
+    """Run one request through the SSE trace and return {stage: event}."""
+    import json as _json
+
+    body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "Review this diff."}],
+        "max_tokens": 8000,
+        **kw,
+    }
+    res = client.post("/demo/trace", json=body, headers={"x-tenant-id": "t-e2e"})
+    assert res.status_code == 200, res.text
+    events = {}
+    for frame in res.text.split("\n\n"):
+        for line in frame.split("\n"):
+            if line.startswith("data: ") and line[6:] != "[DONE]":
+                ev = _json.loads(line[6:])
+                events[ev["stage"]] = ev
+    return events
+
+
+def test_every_timed_stage_carries_a_baseline_verdict(client):
+    """The console colours from these. A stage without one is drawn neutral,
+    which silently hides exactly the slow step you were looking for."""
+    events = _stages(client)
+
+    for name in ("canonicalised", "classified", "routed", "served"):
+        ev = events[name]
+        assert "stage_ms" in ev, f"{name} has no per-stage duration"
+        assert "baseline" in ev, f"{name} has no baseline verdict"
+        assert ev["baseline"]["band"] in {
+            "fast", "normal", "warn", "critical", "learning",
+        }
+        assert ev["baseline"]["note"]
+
+
+def test_a_cold_run_starts_out_learning_rather_than_guessing(client):
+    """With no history there is nothing to judge against, and inventing a colour
+    would be worse than admitting it."""
+    assert _stages(client)["classified"]["baseline"]["band"] == "learning"
+
+
+def test_the_upstream_call_is_judged_on_its_own_latency(client):
+    """Wall-clock between stages includes whatever the cache pilot spent
+    waiting. Blaming the vendor for our own wait would be unfalsifiable."""
+    served = _stages(client)["served"]
+    assert served["baseline"]["measured_ms"] == served["latency_ms"]
+    assert served["baseline"]["segment"].startswith("served:")
+    assert served["model"] in served["baseline"]["segment"]
+
+
+def test_baselines_become_confident_and_are_published(client):
+    """Every colour has to be checkable against the numbers behind it."""
+    from aigateway.observability.baselines import MIN_SAMPLES
+
+    for _ in range(MIN_SAMPLES + 2):
+        _stages(client)
+
+    snap = client.get("/admin/baselines", headers={"x-tenant-id": "t-e2e"}).json()
+    by_key = {s["key"]: s for s in snap["segments"]}
+
+    assert snap["min_samples"] == MIN_SAMPLES
+    classified = by_key["classified"]
+    assert classified["confident"] is True
+    assert classified["samples"] >= MIN_SAMPLES
+    # The thresholds a band was measured against are published, not implied.
+    if classified["stddev_ms"] > 0:
+        assert classified["critical_above_ms"] > classified["warn_above_ms"]
+    else:
+        # A stub provider makes every local stage identically fast. There is no
+        # sigma to multiply, so publishing a number would misrepresent the rule.
+        assert classified["degenerate"] is True
+        assert classified["warn_above_ms"] is None
+
+    # And once confident, a stage stops reporting `learning`.
+    assert _stages(client)["classified"]["baseline"]["band"] != "learning"
+
+
+def test_upstream_segments_separate_cache_states(client):
+    """A cold write and a warm read are not the same operation, and pooling
+    them paints every cold request red."""
+    for _ in range(3):
+        _stages(client, x_gateway={"session_id": "base-warm"})
+
+    snap = client.get("/admin/baselines", headers={"x-tenant-id": "t-e2e"}).json()
+    served = [s["key"] for s in snap["segments"] if s["key"].startswith("served:")]
+    states = {k.rsplit(":", 1)[-1] for k in served}
+    assert states, "the upstream call must be segmented"
+    assert all(":" in k for k in served)
+
+
 def test_fanout_pilot_means_one_writer(client):
     """Eight sub-agents, one shared prefix: one write, the rest read."""
     res = client.post(

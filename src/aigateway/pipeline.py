@@ -33,7 +33,8 @@ from .catalog import ModelSpec, Tier
 from .config import Settings
 from .errors import GatewayError, ProviderRefusal, UpstreamError
 from .governance import BudgetGuard, CostLedger, RateLimiter, price_usage
-from .observability import RecordSink, RequestRecord, TraceContext
+from .observability import LatencyBaselines, RecordSink, RequestRecord, TraceContext
+from .observability.baselines import segment_key
 from .quality import (
     REASONING_FLOOR_BY_EFFORT,
     Check,
@@ -130,6 +131,7 @@ class GatewayPipeline:
         sink: RecordSink,
         health=None,
         reputation=None,
+        baselines: LatencyBaselines | None = None,
     ):
         self._s = settings
         self._store = store
@@ -142,6 +144,9 @@ class GatewayPipeline:
         self._sink = sink
         self._health = health
         self._reputation = reputation
+        # Learned expectations, so the console can say whether *this* stage was
+        # slow rather than just how long it took.
+        self.baselines = baselines or LatencyBaselines()
         self.pilot = CachePilot(
             store, enabled=settings.cache_pilot_enabled, wait_ms=settings.cache_pilot_wait_ms
         )
@@ -212,10 +217,60 @@ class GatewayPipeline:
         emit=None,
         trace: TraceContext | None = None,
     ) -> ChatCompletionResponse:
+        last_stage_at = started
+
         async def stage(name: str, payload: dict) -> None:
-            if emit:
-                payload["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
-                await emit(name, payload)
+            """Emit one stage, timed and judged against its baseline.
+
+            Two clocks, because they answer different questions: `elapsed_ms` is
+            cumulative and says where in the request you are; `stage_ms` is this
+            step alone and is the only one worth comparing to a baseline.
+
+            The upstream call is judged on its own measured latency rather than
+            on wall-clock between stages — the two differ by whatever the cache
+            pilot spent waiting, and blaming the vendor for our own wait would
+            be both wrong and unfalsifiable.
+            """
+            nonlocal last_stage_at
+            now = time.perf_counter()
+            if not emit:
+                last_stage_at = now
+                return
+
+            payload["elapsed_ms"] = int((now - started) * 1000)
+            # Sub-millisecond resolution, because most gateway-local work is
+            # sub-millisecond: truncating to whole ms pinned canonicalise,
+            # classify and route at a flat 0 and threw away the only signal
+            # those three stages have.
+            payload["stage_ms"] = round(max(0.0, (now - last_stage_at) * 1000), 3)
+            last_stage_at = now
+
+            if name == "served":
+                key = segment_key(
+                    "served",
+                    model=payload.get("model", ""),
+                    cache_state=payload.get("cache_state", ""),
+                )
+                measured = payload.get("latency_ms", payload["stage_ms"])
+            else:
+                key, measured = name, payload["stage_ms"]
+
+            payload["baseline"] = self.baselines.observe_and_judge(key, measured)
+            payload["baseline"]["segment"] = key
+            payload["baseline"]["measured_ms"] = measured
+            await emit(name, payload)
+
+        def restart_stage_clock() -> None:
+            """Stop charging the next stage for the upstream call.
+
+            Stage durations are wall-clock between emissions, and the model call
+            sits between `cache` and `quality` without being a stage of its own —
+            so `quality` was being billed the entire vendor round-trip and
+            learned a 3.7-second baseline for work that takes microseconds. The
+            upstream call is measured separately and reported on `served`.
+            """
+            nonlocal last_stage_at
+            last_stage_at = time.perf_counter()
 
         # 1. inbound rate limit
         await self._limiter.check_tenant(principal.tenant_id)
@@ -383,6 +438,7 @@ class GatewayPipeline:
             if role is PilotRole.PILOT:
                 await self.pilot.release_failed(plan.fingerprint)
             raise
+        restart_stage_clock()
 
         if role is PilotRole.PILOT and plan.cacheable:
             await self.pilot.mark_warm(plan.fingerprint, self._s.session_ttl_seconds)
@@ -459,6 +515,7 @@ class GatewayPipeline:
                 "completion_tokens": response.usage.completion_tokens,
                 "fallback_chain": chain,
                 "latency_ms": latency_ms,
+                "cache_state": decision.cache_state,
             },
         )
         if trace is not None:

@@ -469,6 +469,68 @@ guards for demanding work rather than published constants. They need re-measurin
 when the line-up changes — which is the same obligation D23 places on pricing.
 Callers with tight budgets now get told up front instead of billed for silence.
 
+### D25 — Latency banding: colour is a claim, so it has to be checkable
+**Context.** A duration on its own tells you nothing. "1,847ms" is excellent for
+a heavy model writing a cold cache and terrible for a rules classifier. Colouring
+each stage turns the number into a judgement — and a judgement the dashboard makes
+on your behalf is only worth having if it is right and if you can audit it.
+
+**Decision.** `observability/baselines.py` learns a mean and standard deviation
+per stage with Welford's algorithm, bands each observation at 1σ (warn) and 2σ
+(critical), and publishes everything it judged against at `/admin/baselines`.
+Four constraints do the real work, and each one exists because the naive version
+fails:
+
+- **Segmented, never global.** Keys carry what legitimately changes the expected
+  duration: the upstream call is keyed per model *and* per cache state. Pooling
+  a cold write with a warm read paints every cold request red.
+- **Confidence-gated.** Under `MIN_SAMPLES` a segment reports `learning` and is
+  drawn neutral. Mean and σ over three samples are noise with a decimal point.
+- **Material as well as anomalous.** A band above `normal` also requires an
+  absolute gap of `MIN_MATERIAL_DEVIATION_MS` (25ms). This was not a hypothetical:
+  the first live run lit three stages red at 3.7σ over *30 microseconds* of
+  jitter. Statistically correct, operationally worthless. When σ and the floor
+  disagree the verdict says so — "1.1 sigma from the 0.04ms baseline, but only
+  0.02ms in absolute terms" — so the number and the colour never look like they
+  contradict each other.
+- **Judged before it is recorded.** Scoring a sample against a baseline it has
+  already moved is how an anomaly hides itself: the more extreme the outlier, the
+  harder it drags the mean towards itself.
+
+Verdicts ride on each SSE stage event, so the console is rendering a judgement
+the server computed and published rather than a threshold invented in the browser
+that nobody could check.
+
+**Consequences.** Two reporting bugs fell out of building this and are worth
+recording, because both were the report contradicting itself rather than the
+maths being wrong. A zero-variance segment published `warn ≥ 40, critical ≥ 40`,
+which reads as "anything at the mean is critical" and is not what `judge` does;
+it now reports the rule instead of a number. And sub-millisecond segments printed
+`σ = 0.0` while deriving thresholds from a non-zero σ — every published figure is
+now derived from the *rounded* σ, so the report cannot disagree with itself.
+
+Stage timing is sub-millisecond because gateway-local work is: whole-millisecond
+truncation pinned canonicalise, classify and route at a flat 0 and threw away the
+only signal those stages have. The upstream call is judged on its own measured
+latency rather than wall-clock between stages, because the two differ by whatever
+the cache pilot spent waiting and blaming the vendor for our own wait would be
+both wrong and unfalsifiable. For the same reason the stage clock restarts after
+the model call: `quality` was being charged the entire vendor round-trip and had
+learned a 3.7-second baseline for work that takes 0.24ms.
+
+**On SLAs.** The seeded priors are *ours*, not the vendors'. OpenAI and Anthropic
+publish availability SLAs, not latency SLAs, so nothing here is labelled `sla`
+on their behalf — a prior is marked `prior` and is replaced by observed data as
+soon as a segment has enough of it. Treating a vendor's uptime commitment as a
+latency promise would be the same class of error as D23's unverified pricing.
+
+**Known limit.** Latency is right-skewed, so 2σ does not mean "the slowest 2.3%"
+the way it would for a normal distribution — in practice it flags somewhat more.
+The bands stay in σ because that is the agreed vocabulary; p50/p95 and a
+percentile rank ship alongside so the skew is visible rather than implied. Moving
+the bands to log-space or to fixed percentiles would be the principled fix and is
+an open question, not a decision.
+
 ### D21 — A streamed stage trace for the console
 **Context.** A routing decision that appears all at once, after the fact, is
 indistinguishable from a mock. Animating it on a timer would be a lie.

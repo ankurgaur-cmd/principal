@@ -61,6 +61,18 @@ async def fleet(request: Request, flow_limit: int = 25) -> dict:
     return request.app.state.fleet.snapshot(flow_limit=flow_limit)
 
 
+@router.get("/baselines")
+async def baselines(request: Request) -> dict:
+    """What the console is colouring against.
+
+    Published deliberately. A colour you cannot check is a colour you have to
+    trust blindly — this returns every segment's mean, sigma, p50/p95, sample
+    count and the exact thresholds a `warn` or `critical` was measured against,
+    so any band on screen can be verified rather than believed.
+    """
+    return request.app.state.baselines.snapshot()
+
+
 @router.post("/fleet/reset")
 async def reset_fleet(request: Request) -> dict:
     request.app.state.fleet.reset()
