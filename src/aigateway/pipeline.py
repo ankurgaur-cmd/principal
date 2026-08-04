@@ -38,12 +38,14 @@ from .observability.baselines import segment_key
 from .quality import (
     REASONING_FLOOR_BY_EFFORT,
     Check,
+    QualityReport,
     assess,
     budget_starves_the_answer,
     judge,
 )
 from .routing import IntentClassifier, Router, explain
 from .routing.effort import EffortObservation
+from .routing.policy import policy_for
 from .schemas import (
     CanonicalRequest,
     ChatCompletionChoice,
@@ -105,6 +107,7 @@ def canonicalise(request: ChatCompletionRequest) -> CanonicalRequest:
         tool_choice=request.tool_choice,
         response_schema=schema,
         max_tokens=request.resolved_max_tokens(),
+        max_tokens_explicit=request.chose_max_tokens(),
         effort=ext.effort,
         stream=request.stream,
         temperature=request.temperature,
@@ -186,7 +189,14 @@ class GatewayPipeline:
         )
 
         try:
-            return await self._run(request, principal, record, started, emit, trace)
+            return await self._run(
+                request,
+                principal,
+                record,
+                started,
+                emit,
+                trace if self._s.hop_trace_enabled else None,
+            )
         except ProviderRefusal as exc:
             record.outcome = "refusal"
             record.error = str(exc.detail)
@@ -256,9 +266,10 @@ class GatewayPipeline:
             else:
                 key, measured = name, payload["stage_ms"]
 
-            payload["baseline"] = self.baselines.observe_and_judge(key, measured)
-            payload["baseline"]["segment"] = key
-            payload["baseline"]["measured_ms"] = measured
+            if self._s.latency_baselines_enabled:
+                payload["baseline"] = self.baselines.observe_and_judge(key, measured)
+                payload["baseline"]["segment"] = key
+                payload["baseline"]["measured_ms"] = measured
             await emit(name, payload)
 
         def restart_stage_clock() -> None:
@@ -311,6 +322,30 @@ class GatewayPipeline:
                 "declared": canonical.intent_hint,
             },
         )
+
+        # 3b. size the output budget to the work, unless the caller chose one.
+        #
+        # Output budget is what a request actually spends its wall-clock on: the
+        # same prompt measured 18s at 1,200 tokens and 58s at 8,000, while every
+        # gateway-local stage together took 1.3ms. A single global default is
+        # therefore either slow for classification or starving for review, and
+        # it cannot be both right. The intent knows which this is.
+        if not canonical.max_tokens_explicit and self._s.auto_size_max_tokens:
+            budget = policy_for(intent.intent).max_tokens
+            if budget != canonical.max_tokens:
+                canonical.max_tokens = budget
+                await stage(
+                    "budgeted",
+                    {
+                        "max_tokens": budget,
+                        "intent": intent.intent,
+                        "source": "intent policy",
+                        "note": (
+                            f"No max_tokens given, so '{intent.intent}' work was "
+                            f"sized to {budget:,} tokens. Send max_tokens to override."
+                        ),
+                    },
+                )
 
         # 4. dry route -> cost estimate
         decision = await self._router.route(canonical, intent.intent)
@@ -471,7 +506,11 @@ class GatewayPipeline:
 
         # 11. did the routing decision actually work out? Deterministic checks
         #     are free; the LLM grader is opt-in because it is a billable call.
-        report = assess(canonical, response, decision)
+        report = (
+            assess(canonical, response, decision)
+            if self._s.quality_checks_enabled
+            else QualityReport()
+        )
         if self._s.quality_judge_enabled and self._registry.enabled:
             last_user = next(
                 (m.content for m in reversed(canonical.messages) if m.role == "user"), ""
@@ -493,6 +532,8 @@ class GatewayPipeline:
         # told so by configuration.
         if self._reputation:
             self._reputation.record(model_used.key, intent.intent, report.routing_ok)
+
+        if self._reputation and self._s.effort_tracking_enabled:
             # What this answer actually cost beyond one clean call. Everything
             # here is measured on this request; the signals that need a human
             # in the loop arrive later via POST /admin/effort.

@@ -180,7 +180,6 @@ def _stages(client, **kw):
     body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "Review this diff."}],
-        "max_tokens": 8000,
         **kw,
     }
     res = client.post("/demo/trace", json=body, headers={"x-tenant-id": "t-e2e"})
@@ -262,6 +261,58 @@ def test_upstream_segments_separate_cache_states(client):
     states = {k.rsplit(":", 1)[-1] for k in served}
     assert states, "the upstream call must be segmented"
     assert all(":" in k for k in served)
+
+
+def test_an_absent_budget_is_sized_to_the_intent(client):
+    """Output budget dominates wall-clock — the same prompt measured 18s at
+    1,200 tokens and 58s at 8,000, while every gateway stage together took
+    1.3ms. One global default is either slow for classification or starving for
+    review, and it cannot be both right."""
+    from aigateway.routing.policy import policy_for
+
+    events = _stages(client)  # no max_tokens sent
+    budgeted = events.get("budgeted")
+
+    assert budgeted, "an absent budget must be sized, not defaulted globally"
+    assert budgeted["max_tokens"] == policy_for(events["classified"]["intent"]).max_tokens
+    assert "max_tokens" in budgeted["note"], "and it must say what it did"
+
+
+def test_a_caller_supplied_budget_always_wins(client):
+    """Their budget is their decision. The gateway sizes an absent one; it does
+    not overrule one that was given."""
+    events = _stages(client, max_tokens=333)
+    assert "budgeted" not in events
+
+
+def test_light_work_gets_a_smaller_budget_than_heavy_work(client):
+    from aigateway.routing.policy import policy_for
+
+    assert policy_for("classify").max_tokens < policy_for("code_review").max_tokens
+    assert policy_for("code_review").max_tokens < policy_for("architecture").max_tokens
+
+
+def test_every_intent_has_a_budget_above_its_reasoning_floor(client):
+    """A policy budget below the floor for its own effort guarantees an empty
+    answer — the gateway would be shipping a default that cannot work."""
+    from aigateway.quality import REASONING_FLOOR_BY_EFFORT
+    from aigateway.routing.policy import INTENT_POLICY
+
+    for policy in INTENT_POLICY.values():
+        floor = REASONING_FLOOR_BY_EFFORT[policy.effort]
+        if policy.min_tier.name != "LIGHT":
+            assert policy.max_tokens >= floor, (
+                f"{policy.intent}: budget {policy.max_tokens} is below the "
+                f"{floor} floor for effort '{policy.effort}'"
+            )
+
+
+def test_health_publishes_the_switches(client):
+    switches = client.get("/health").json()["switches"]
+    assert switches["auto_size_max_tokens"] is True
+    assert switches["quality_judge"] is False, "a billable extra call stays opt-in"
+    for name in ("latency_baselines", "hop_trace", "quality_checks", "effort_tracking"):
+        assert name in switches
 
 
 def test_fanout_pilot_means_one_writer(client):

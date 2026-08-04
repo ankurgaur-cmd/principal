@@ -351,11 +351,28 @@ details summary{cursor:pointer;font-size:12px;color:var(--text-secondary)}
             <option value="heavy">heavy</option></select></div>
         </div>
         <div class="row">
-          <div><label for="maxTokens">Max tokens</label><input type="text" id="maxTokens" value="8000"></div>
+          <div><label for="maxTokens">Max tokens <span id="mtAuto" class="hint"
+            style="margin:0"></span></label><input type="text" id="maxTokens" value=""
+            placeholder="auto — sized to the intent"></div>
           <div><label for="pace">Playback</label><select id="pace">
             <option value="watch">Watch — step through</option>
             <option value="instant">Instant — real speed</option></select></div>
         </div>
+        <div class="row">
+          <div><label for="speed">Speed profile</label><select id="speed">
+            <option value="auto">Auto — budget sized to the intent</option>
+            <option value="fast">Fast — low effort, tight budget</option>
+            <option value="balanced">Balanced</option>
+            <option value="thorough">Thorough — max depth, slowest</option>
+          </select></div>
+        </div>
+        <div class="hint"><b>This is the lever that matters for latency.</b> Measured on this
+          gateway, the same prompt took <b>18s</b> at 1,200 output tokens, <b>27s</b> at 4,000
+          and <b>58s</b> at 8,000 — while every gateway stage <i>together</i> took
+          <b>1.3ms</b>. Effort is the second lever (low is ~25% faster than medium for a
+          comparable answer), and the model tier is the third. Nothing in the gateway is
+          worth switching off to go faster; see <code>/health</code> for the switches that
+          exist and what they actually cost.</div>
         <div class="hint">Reasoning models bill hidden reasoning against the same output budget,
           and on demanding work they spend far more of it than you would expect: measured on one
           heavy review prompt, <b>gpt-5</b> used 1,937 tokens at low effort and 6,080 at high,
@@ -836,16 +853,31 @@ and the concrete input or interleaving that breaks it. If a finding depends on
 an assumption you cannot verify from the diff, say which assumption. Be brief:
 the author reads every line of your review, and padding hides the real defect.`;
 
+/* Effort and budget together — the two levers that actually govern wall-clock.
+   `auto` sends neither, so the gateway sizes the budget from the intent. */
+const SPEED = {
+  auto:     { effort:"",       maxTokens:"" },
+  fast:     { effort:"low",    maxTokens:"2000" },
+  balanced: { effort:"medium", maxTokens:"5000" },
+  thorough: { effort:"xhigh",  maxTokens:"14000" },
+};
+
 const PRESETS = {
   easy:{ prompt:"Classify the sentiment of this support ticket as positive, neutral or negative.",
-         context:"", maxTokens:"600" },
+         context:"", maxTokens:"" },
   hard:{ prompt:"Review this authentication middleware for security issues and race conditions.",
-         context:"You are a senior code reviewer for a payments platform.", maxTokens:"8000" },
+         context:"You are a senior code reviewer for a payments platform.", maxTokens:"" },
   cache:{ prompt:"Review this change: it wraps the capture call in a three-attempt retry loop, "
                 +"with no idempotency key on the request. What breaks, and under which interleaving?",
           context:PAYMENTS_REVIEW_STANDARD,
-          maxTokens:"8000" },
+          maxTokens:"" },
 };
+$("speed").onchange = () => {
+  const s = SPEED[$("speed").value];
+  $("effort").value = s.effort; $("maxTokens").value = s.maxTokens;
+  $("mtAuto").textContent = s.maxTokens ? "" : "— sized by intent";
+};
+
 document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => {
   const p = PRESETS[b.dataset.preset];
   $("prompt").value = p.prompt; $("context").value = p.context;
@@ -1118,7 +1150,9 @@ $("sendBtn").onclick = async () => {
       method:"POST",
       headers:{ "content-type":"application/json", "x-tenant-id":"demo", "x-agent-id":"console" },
       body: JSON.stringify({ model:"auto", messages,
-        max_tokens: parseInt($("maxTokens").value) || 8000,
+        // Omitted when blank: the gateway then sizes the budget from the intent,
+        // which is what stops a classification being handed a review's budget.
+        ...(parseInt($("maxTokens").value) ? { max_tokens: parseInt($("maxTokens").value) } : {}),
         x_gateway:{ session_id:$("session").value||null, intent:$("intent").value||null,
           effort:$("effort").value||null, max_tier:$("maxTier").value||null } }) });
     if (!res.ok) { const d = await res.json().catch(()=>({}));
@@ -1183,6 +1217,11 @@ function handleStage(ev) {
         sub:`${Math.round(ev.confidence*100)}% via <b>${esc(ev.source)}</b>`
           + (ev.rationale?`<br>${esc(ev.rationale)}`:"") });
       markActive("s3"); break;
+    case "budgeted":
+      $("mtAuto").textContent = `— gateway chose ${ev.max_tokens.toLocaleString()}`;
+      $("reason").className = "reason";
+      $("reason").textContent = ev.note;
+      break;
     case "budget":
       if (ev.degraded) { $("reason").className = "reason err"; $("reason").textContent = "⚠ " + ev.message; }
       break;

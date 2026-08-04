@@ -94,6 +94,32 @@ class Settings(BaseSettings):
     quality_judge_enabled: bool = False
     quality_judge_model: str = "claude-haiku-4-5"
 
+    # -- optional work, switchable ------------------------------------------
+    #
+    # Measure before turning any of these off. On this gateway every local
+    # stage *together* costs about 1.3ms against an upstream call of 18-58
+    # seconds, so switching them off buys roughly a thousandth of a percent and
+    # costs you the ability to explain what happened. They exist for the case
+    # where you are running the gateway hot and want the serving path minimal,
+    # not as a latency fix — the levers that move latency are `max_tokens`,
+    # `effort`, and which model you land on, in that order.
+    #
+    # `auto_size_max_tokens` is the exception that genuinely matters: it sizes
+    # an absent output budget to the intent instead of a single global default,
+    # and output budget is what dominates wall-clock. Turning it off restores
+    # the old one-size default and will make short work slow again.
+    auto_size_max_tokens: bool = True
+    # Learned latency baselines, and the colours the console derives from them.
+    latency_baselines_enabled: bool = True
+    # Per-transaction hop trace: origination and every upstream call.
+    hop_trace_enabled: bool = True
+    # Deterministic response checks. Free, and they are what makes a claimed
+    # saving falsifiable — turning these off is the one that actually costs you
+    # something.
+    quality_checks_enabled: bool = True
+    # Effort scoring on every response.
+    effort_tracking_enabled: bool = True
+
     # -- governance --
     default_tenant_daily_usd: float = 50.0
     default_tenant_rpm: int = 600

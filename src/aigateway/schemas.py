@@ -75,8 +75,18 @@ class ChatCompletionRequest(BaseModel):
 
     def resolved_max_tokens(self) -> int:
         # Don't lowball: hitting the cap truncates mid-thought and forces a retry.
-        # 16k is safe for unary requests; streaming paths raise this.
+        # Only used when the caller gave no budget *and* the intent has no policy
+        # default — see `chose_max_tokens`.
         return self.max_tokens or self.max_completion_tokens or 16_000
+
+    def chose_max_tokens(self) -> bool:
+        """Did the caller actually pick a budget, or are we defaulting?
+
+        Output budget is what governs latency, so the difference matters: a
+        caller's number is a decision to respect, and an absent one should be
+        sized to the work rather than to a single global fallback.
+        """
+        return self.max_tokens is not None or self.max_completion_tokens is not None
 
 
 class Usage(BaseModel):
@@ -161,6 +171,7 @@ class CanonicalRequest(BaseModel):
     tool_choice: Any = None
     response_schema: dict[str, Any] | None = None
     max_tokens: int = 16_000
+    max_tokens_explicit: bool = False
     effort: str | None = None
     stream: bool = False
 

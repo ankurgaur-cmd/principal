@@ -154,6 +154,17 @@ def create_app() -> FastAPI:
             "cache_aware_routing": settings.cache_aware_routing,
             "escalate_only": settings.escalate_only,
             "budget_mode": settings.budget_mode,
+            # Switchable work. Measure before changing any of these: together
+            # they cost ~1.3ms against an upstream call of tens of seconds.
+            "switches": {
+                "auto_size_max_tokens": settings.auto_size_max_tokens,
+                "latency_baselines": settings.latency_baselines_enabled,
+                "hop_trace": settings.hop_trace_enabled,
+                "quality_checks": settings.quality_checks_enabled,
+                "effort_tracking": settings.effort_tracking_enabled,
+                "quality_judge": settings.quality_judge_enabled,
+                "llm_classifier": settings.llm_classifier_enabled,
+            },
         }
 
     from .catalog import catalog_warnings, stale_prices, unverified_prices
