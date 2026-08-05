@@ -350,7 +350,8 @@ unknown               standard   medium 5,000
 ```
 
 **`min_tier` is a floor, not a target.** Widening the catalog is how you get
-cheaper, not editing this table downward.
+cheaper, not editing this table downward. What the router does with the floor is
+[ROUTING.md](ROUTING.md).
 
 **`unknown` is deliberately `standard`, never `light`.** Abstention must not be a
 discount: if the classifier does not know what the work is, guessing light is the

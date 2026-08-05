@@ -18,7 +18,8 @@ prompt cache** — which is the part naive routers get wrong.
 
 Design rationale, decision records (D1–D26), failure modes, and known gaps:
 **[ARCHITECTURE.md](ARCHITECTURE.md)**. How the gateway decides what you asked
-for, layer by layer: **[CLASSIFICATION.md](CLASSIFICATION.md)**.
+for: **[CLASSIFICATION.md](CLASSIFICATION.md)**. How it then picks a model:
+**[ROUTING.md](ROUTING.md)**.
 
 ---
 
@@ -532,7 +533,7 @@ src/aigateway/
   routing/
     intent.py        layered intent classification
     policy.py        intent → tier floor + effort
-    router.py        cache-aware, quality-adjusted scoring
+    router.py        cache-aware, quality-adjusted scoring (see ROUTING.md)
     reputation.py    per (model, intent) success rate and effort
     effort.py        the open effort table
     explain.py       the plain-language account of a decision
