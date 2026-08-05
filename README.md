@@ -17,7 +17,8 @@ prompt cache** — which is the part naive routers get wrong.
   record per request that feeds an offline replay harness.
 
 Design rationale, decision records (D1–D26), failure modes, and known gaps:
-**[ARCHITECTURE.md](ARCHITECTURE.md)**.
+**[ARCHITECTURE.md](ARCHITECTURE.md)**. How the gateway decides what you asked
+for, layer by layer: **[CLASSIFICATION.md](CLASSIFICATION.md)**.
 
 ---
 
@@ -507,7 +508,7 @@ Sent in the request body; invisible to vendors.
 | Field | Purpose |
 |---|---|
 | `session_id` | Groups turns of one workflow. Enables cache-aware, sticky routing. **Send this.** |
-| `intent` | Caller-declared intent (layer 0). Verified and overridable. |
+| `intent` | Caller-declared intent (layer 0). Accepted as given, but overridden if the request is plainly heavier than the label — see [CLASSIFICATION.md](CLASSIFICATION.md#3-l0--the-declared-hint-trusted-but-checked). |
 | `effort` | `low`…`max`, mapped per vendor. Stepped down if `max_tokens` cannot support it. |
 | `cache_hints` | Which regions get breakpoints: `system`, `tools`, `history`, `last_turn`. |
 | `pin_model` | Bypass the router. Logged as a routing bypass. Needs the `model:pin` scope. |

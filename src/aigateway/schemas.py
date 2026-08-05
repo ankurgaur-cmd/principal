@@ -41,7 +41,9 @@ class GatewayExtensions(BaseModel):
         "omitting it forfeits cache-aware routing.",
     )
     intent: str | None = Field(
-        None, description="Caller-declared intent. Verified, and overridable, by the gateway."
+        None,
+        description="Caller-declared intent. Accepted as given, but overridden when "
+        "the request is plainly heavier than the label — never lighter.",
     )
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     cache_hints: list[Literal["system", "tools", "history", "last_turn"]] | None = Field(

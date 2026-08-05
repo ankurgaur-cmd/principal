@@ -556,16 +556,20 @@ details summary{cursor:pointer;font-size:12px;color:var(--text-secondary)}
             <div><label for="pilotOn">Cache pilot</label><select id="pilotOn">
               <option value="true">enabled</option><option value="false">disabled</option></select></div>
           </div>
+          <label for="fanCtx" style="margin-top:10px">Shared context — the cacheable prefix,
+            identical for every agent</label>
+          <textarea id="fanCtx" style="min-height:80px"></textarea>
+          <div class="hint" id="fanCtxSize"></div>
           <label for="fanTasks" style="margin-top:10px">Per-agent tasks — one per line</label>
-          <textarea id="fanTasks" style="min-height:92px">Check the retry loop for duplicate-capture risk.
-Check whether the idempotency key is enforced in the database or only in code.
-Check the ordering assumptions between capture and refund.
-Check what happens on a read timeout mid-capture.
-Check the ledger entries this path writes.
-Check the tests: would they fail without the fix?</textarea>
-          <div class="hint">Every agent shares the same prefix from tab 1 — that is what makes
-            the cache shareable — but each gets its own task, so the six answers are worth
-            comparing. Leave this empty to send all agents the identical prompt.</div>
+          <textarea id="fanTasks" style="min-height:92px">Does the retry loop risk charging the customer twice? Name the exact interleaving.
+Is the captured flag a real idempotency guarantee, or a check-then-act race?
+The acquirer call has no idempotency key. Is the author's justification sound?
+A read timeout fires after the acquirer committed. What state is the payment in?
+Are the ledger entries correct under every path through this function, including the raise?
+The author says existing tests still pass. What test would fail without this change?</textarea>
+          <div class="hint">Each agent gets its own question about the <i>same</i> diff, so the
+            six answers are worth comparing side by side. Leave this empty and every agent
+            receives the identical prompt instead — which is what made them all look the same.</div>
           <div class="row" style="margin-top:12px"><button class="primary" id="fanBtn">Run fan-out</button></div>
           <div class="hint">Run enabled, then disabled, and compare total writes.</div>
           <div id="fanResult" style="margin-top:12px"></div>
@@ -861,6 +865,58 @@ const SPEED = {
   balanced: { effort:"medium", maxTokens:"5000" },
   thorough: { effort:"xhigh",  maxTokens:"14000" },
 };
+
+
+/* The artifact the sub-agents actually review.
+   Without this the fan-out demo asked six agents to review code it never
+   supplied, so every one of them opened with "I don't have the code" and
+   followed with a generic checklist — six answers that were technically
+   different and indistinguishable at a glance. An agent with nothing concrete
+   to look at cannot produce a concrete answer. */
+const CAPTURE_DIFF = `## The change under review
+
+\`\`\`diff
+--- a/payments/capture.py
++++ b/payments/capture.py
+@@ -14,11 +14,22 @@ from ledger import post_entries
+ 
+ def capture(intent_id: str, amount_minor: int, currency: str):
+-    resp = acquirer.capture(intent_id, amount_minor, currency, timeout=8)
+-    if resp.ok:
+-        post_entries(intent_id, amount_minor, currency, resp.reference)
+-    return resp
++    last_error = None
++    for attempt in range(3):
++        try:
++            resp = acquirer.capture(
++                intent_id, amount_minor, currency, timeout=8
++            )
++        except (ReadTimeout, ConnectionError) as exc:
++            last_error = exc
++            time.sleep(0.2 * attempt)
++            continue
++        if resp.ok:
++            intent = db.query(
++                "SELECT captured FROM intents WHERE id = %s", intent_id
++            )
++            if not intent.captured:
++                post_entries(intent_id, amount_minor, currency, resp.reference)
++                db.execute(
++                    "UPDATE intents SET captured = true WHERE id = %s", intent_id
++                )
++            return resp
++        last_error = resp.error
++    raise CaptureFailed(last_error)
+\`\`\`
+
+Context the author supplied: "The acquirer occasionally drops connections
+during peak, and we were losing captures. This retries three times. The
+\`captured\` flag stops us double-posting to the ledger. There is no
+idempotency key on the acquirer call because their API does not require one.
+Existing tests still pass."
+
+The \`intents\` table has a primary key on \`id\` and no other constraints.
+Two application servers handle traffic for the same merchant.`;
 
 const PRESETS = {
   easy:{ prompt:"Classify the sentiment of this support ticket as positive, neutral or negative.",
@@ -1298,7 +1354,7 @@ $("fanBtn").onclick = async () => {
   try {
     const res = await fetch("/demo/fanout", {
       method:"POST", headers:{ "content-type":"application/json", "x-tenant-id":"demo" },
-      body: JSON.stringify({ prompt:$("prompt").value, shared_context:$("context").value,
+      body: JSON.stringify({ prompt:$("prompt").value, shared_context:$("fanCtx").value,
         agents: Math.max(1, Math.min(12, parseInt($("agents").value)||4)),
         subtasks: $("fanTasks").value.split("\n").map(s => s.trim()).filter(Boolean),
         session_id:($("session").value||"demo-1")+"-fanout",
@@ -1365,7 +1421,7 @@ $("fanBtn").onclick = async () => {
                a.answer ? esc(a.answer)
                         : "(empty — see the quality check above)"}</div>
            </div>`).join("")}
-      <div class="hint">Click an agent to read its answer. Cache read
+      <div class="hint">Cache read
         ${d.total_cache_read_tokens.toLocaleString()} tok · written
         ${d.total_cache_write_tokens.toLocaleString()} tok. On OpenAI there is no separate
         write step — caching is automatic, so writes stay 0 and only reads appear.</div>`;
@@ -1607,7 +1663,20 @@ async function refreshBaselines() {
   } catch (e) { console.error("baselines", e); }
 }
 
+function seedFanout() {
+  $("fanCtx").value = PAYMENTS_REVIEW_STANDARD + "\n\n" + CAPTURE_DIFF;
+  const n = Math.round($("fanCtx").value.length / 3.6);
+  $("fanCtxSize").innerHTML = `prefix &asymp; <b>${n.toLocaleString()} tokens</b> — the review
+    standard plus the diff under review. Both are identical across agents, which is what makes
+    the cache shareable; only the task below varies.`;
+}
+$("fanCtx") && ($("fanCtx").oninput = () => {
+  const n = Math.round($("fanCtx").value.length / 3.6);
+  $("fanCtxSize").innerHTML = `prefix &asymp; <b>${n.toLocaleString()} tokens</b>`;
+});
+
 async function boot() {
+  seedFanout();
   await refreshHealth(); await refreshCreds(); await refreshPool();
   await refreshFleet(); await refreshReputation(); await refreshBaselines();
   try {
