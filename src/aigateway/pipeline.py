@@ -31,9 +31,16 @@ from .cache.hints import plan_cache
 from .cache.pilot import CachePilot, PilotRole
 from .catalog import ModelSpec, Tier
 from .config import Settings
-from .errors import GatewayError, ProviderRefusal, UpstreamError
+from .errors import GatewayError, NoModelsAvailable, ProviderRefusal, UpstreamError
 from .governance import BudgetGuard, CostLedger, RateLimiter, price_usage
-from .observability import LatencyBaselines, RecordSink, RequestRecord, TraceContext
+from .observability import (
+    AlertCentre,
+    LatencyBaselines,
+    RecordSink,
+    RequestRecord,
+    TraceContext,
+    no_models_available,
+)
 from .observability.baselines import segment_key
 from .quality import (
     REASONING_FLOOR_BY_EFFORT,
@@ -136,6 +143,8 @@ class GatewayPipeline:
         health=None,
         reputation=None,
         baselines: LatencyBaselines | None = None,
+        switchboard=None,
+        alerts: AlertCentre | None = None,
     ):
         self._s = settings
         self._store = store
@@ -147,10 +156,15 @@ class GatewayPipeline:
         self._ledger = ledger
         self._sink = sink
         self._health = health
+        self._switchboard = switchboard
         self._reputation = reputation
         # Learned expectations, so the console can say whether *this* stage was
         # slow rather than just how long it took.
         self.baselines = baselines or LatencyBaselines()
+        # Raised when there is nothing left to serve with; cleared by the next
+        # request that succeeds. Recovery is detected from real traffic rather
+        # than a probe, like the circuit breaker.
+        self.alerts = alerts or AlertCentre()
         self.pilot = CachePilot(
             store, enabled=settings.cache_pilot_enabled, wait_ms=settings.cache_pilot_wait_ms
         )
@@ -197,6 +211,17 @@ class GatewayPipeline:
                 emit,
                 trace if self._s.hop_trace_enabled else None,
             )
+        except NoModelsAvailable as exc:
+            record.outcome = "no_models_available"
+            record.error = str(exc.detail)
+            self.alerts.raise_alert(
+                no_models_available(
+                    cause=exc.cause,
+                    detail=exc.detail["error"]["message"],
+                    remedy=exc.remedy,
+                )
+            )
+            raise
         except ProviderRefusal as exc:
             record.outcome = "refusal"
             record.error = str(exc.detail)
@@ -530,6 +555,10 @@ class GatewayPipeline:
         # Feed the outcome back into routing. This is the loop that lets the
         # router learn a cheap model is bad at *this* task, rather than being
         # told so by configuration.
+        # A served request is proof the fleet is reachable again. Recovery is
+        # observed, not probed — the same principle as the circuit breaker.
+        self.alerts.clear("no_models_available")
+
         if self._reputation:
             self._reputation.record(model_used.key, intent.intent, report.routing_ok)
 
@@ -648,7 +677,9 @@ class GatewayPipeline:
         trace: TraceContext | None = None,
     ) -> tuple[ProviderResponse, ModelSpec, list[str]]:
         chain: list[str] = []
-        candidates = [model] + self._registry.fallback_chain(model)
+        candidates = [model] + self._registry.fallback_chain(
+            model, switchboard=self._switchboard, health=self._health
+        )
         last_error: Exception | None = None
 
         for attempt, spec in enumerate(candidates):

@@ -6,7 +6,7 @@ import pytest
 from conftest import make_request
 
 from aigateway.catalog import Tier, get_model
-from aigateway.errors import NoCapableModel
+from aigateway.errors import NoCapableModel, NoModelsAvailable
 
 
 async def test_light_intent_picks_a_light_model(router):
@@ -81,9 +81,18 @@ async def test_unknown_pin_is_rejected(router):
         await router.route(make_request(pin_model="not-a-model"), "classify")
 
 
-async def test_no_capable_model_when_provider_disabled(settings, store):
+async def test_nothing_available_is_a_503_not_a_422(settings, store):
+    """Different problems, different status codes. A 422 says "your request is
+    wrong" and a client retrying one is wasting its time; a 503 says "we cannot
+    serve right now" and retrying is exactly right. An empty candidate set is
+    always the second kind."""
     from aigateway.routing import Router
 
     isolated = Router(settings, store, set())
-    with pytest.raises(NoCapableModel):
+    with pytest.raises(NoModelsAvailable) as exc:
         await isolated.route(make_request(), "classify")
+
+    assert exc.value.status_code == 503
+    assert exc.value.cause == "no_credentials"
+    assert exc.value.remedy, "an alert nobody can act on is just noise"
+    assert exc.value.headers["retry-after"]

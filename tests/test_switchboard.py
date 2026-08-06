@@ -6,7 +6,7 @@ import pytest
 from conftest import make_request
 
 from aigateway.catalog import Tier
-from aigateway.errors import NoCapableModel
+from aigateway.errors import NoCapableModel, NoModelsAvailable
 from aigateway.providers.switchboard import Switchboard
 from aigateway.routing import Router, explain
 
@@ -105,9 +105,16 @@ async def test_switched_off_models_appear_as_ruled_out_with_a_plain_reason(route
 async def test_switching_everything_off_fails_loudly(router, board):
     board.set_provider("openai", False)
     board.set_provider("anthropic", False)
-    with pytest.raises(NoCapableModel) as exc:
+    with pytest.raises(NoModelsAvailable) as exc:
         await router.route(make_request(), "classify")
+
     assert "switched off" in str(exc.value.detail)
+    assert exc.value.status_code == 503
+    # The cause has to distinguish "you turned it off" from "it broke" — they
+    # produce identical empty candidate sets and could not be more different
+    # to act on.
+    assert exc.value.cause == "all_switched_off"
+    assert "switchboard" in exc.value.remedy or "console" in exc.value.remedy
 
 
 async def test_a_dry_run_preview_also_respects_the_switches(router, board):

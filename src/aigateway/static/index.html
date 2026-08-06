@@ -105,6 +105,25 @@ button.sm{padding:4px 10px;font-size:12px}
 .conn path{stroke:var(--baseline);stroke-width:2;fill:none;transition:stroke .2s}
 .conn.lit path{stroke:var(--series-1)}
 @media (max-width:900px){.conn{transform:rotate(90deg);min-height:18px}}
+/* ---- system alert ----------------------------------------------------
+   Deliberately loud and deliberately at the top: this is the gateway saying
+   it has nothing left to serve with, which is not something to discover by
+   scrolling. The bulb pulses so it reads as live rather than as a stale
+   banner someone forgot to dismiss. */
+.sysalert{display:flex;gap:12px;align-items:flex-start;margin:0 0 16px;padding:13px 15px;
+  border-radius:10px;border:1px solid var(--critical);
+  background:color-mix(in srgb,var(--critical) 12%,var(--card));
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--critical) 14%,transparent)}
+.sysalert .bulb{width:13px;height:13px;border-radius:50%;flex:none;margin-top:3px;
+  background:var(--critical);box-shadow:0 0 8px var(--critical);animation:bulb 1.1s ease-in-out infinite}
+@keyframes bulb{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.85)}}
+.sysalert .sa-title{font-weight:600;font-size:14px;color:var(--critical);margin-bottom:4px}
+.sysalert .sa-user{font-size:13.5px;line-height:1.55;color:var(--text-primary)}
+.sysalert .sa-remedy{font-size:12px;line-height:1.5;color:var(--text-secondary);
+  margin-top:7px;font-family:var(--mono)}
+.sysalert.support{border-width:2px}
+@media (prefers-reduced-motion:reduce){.sysalert .bulb{animation:none}}
+
 /* ---- latency banding -------------------------------------------------
    Each stage is coloured against its own learned baseline, never a global
    one. `learning` is deliberately neutral: before there is enough data we
@@ -314,6 +333,16 @@ details summary{cursor:pointer;font-size:12px;color:var(--text-secondary)}
       <b>Always send <code>session_id</code></b> — it groups a workflow's turns and is what
       keeps the prompt cache warm. It is worth more than any other field you can set.
     </div>
+  </div>
+
+  <div id="sysAlert" class="sysalert" style="display:none">
+    <span class="bulb"></span>
+    <div style="flex:1">
+      <div class="sa-title"></div>
+      <div class="sa-user"></div>
+      <div class="sa-remedy"></div>
+    </div>
+    <button id="alertAck" class="sm">Acknowledge</button>
   </div>
 
   <!-- ========== TAB 1 ========== -->
@@ -1211,8 +1240,21 @@ $("sendBtn").onclick = async () => {
         ...(parseInt($("maxTokens").value) ? { max_tokens: parseInt($("maxTokens").value) } : {}),
         x_gateway:{ session_id:$("session").value||null, intent:$("intent").value||null,
           effort:$("effort").value||null, max_tier:$("maxTier").value||null } }) });
-    if (!res.ok) { const d = await res.json().catch(()=>({}));
-      throw new Error(d?.error?.message || `HTTP ${res.status}`); }
+    if (!res.ok) {
+      const d = await res.json().catch(()=>({}));
+      // Prefer the plain-language message. The technical one lists model keys
+      // and vendor names, which tells whoever is using the agent nothing except
+      // that something they cannot see went wrong.
+      const err = d?.error || {};
+      if (err.user_message) {
+        $("answer").textContent = err.user_message;
+        $("reason").className = "reason err";
+        $("reason").textContent = "⚑ " + (err.remedy || err.message || "");
+        refreshAlerts();
+        return;
+      }
+      throw new Error(err.message || `HTTP ${res.status}`);
+    }
     await consumeTrace(res);
   } catch (e) {
     $("reason").className = "reason err"; $("reason").textContent = "✗ " + e.message;
@@ -1220,6 +1262,7 @@ $("sendBtn").onclick = async () => {
   } finally {
     btn.disabled = false; btn.textContent = "Send";
     refreshPool(lastChosen); refreshFleet(); refreshReputation(); refreshBaselines();
+    refreshAlerts();
   }
 };
 
@@ -1311,7 +1354,12 @@ function handleStage(ev) {
     case "hops": renderHops(ev); break;
     case "done": render(ev.response); break;
     case "error":
-      $("reason").className = "reason err"; $("reason").textContent = "✗ " + ev.error;
+      if (ev.user_message) {
+        $("answer").textContent = ev.user_message;
+        refreshAlerts();
+      }
+      $("reason").className = "reason err";
+      $("reason").textContent = "✗ " + (ev.remedy || ev.error);
       NODES.forEach(id => { if ($(id).classList.contains("active")) setNode(id,{state:"err"}); });
       break;
   }
@@ -1675,10 +1723,77 @@ $("fanCtx") && ($("fanCtx").oninput = () => {
   $("fanCtxSize").innerHTML = `prefix &asymp; <b>${n.toLocaleString()} tokens</b>`;
 });
 
+
+/* ---- system alerts --------------------------------------------------
+   The gateway telling us it cannot serve anything. Two audiences, two
+   messages: the operator gets the remedy, the user gets plain language. */
+let alertState = { ok: true, lastCode: null };
+
+/* A short two-tone beep, synthesised rather than fetched — the page ships with
+   no external assets and a strict CSP would block an audio file anyway.
+   Browsers block audio until the user has interacted with the page, so this is
+   best-effort: the red bulb is the signal that always works, the beep is the
+   one that gets attention when it can. */
+function beep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    if (ctx.state === "suspended") { ctx.close(); return; }
+    [[880, 0], [660, 0.18]].forEach(([freq, at]) => {
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = "sine"; osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime + at);
+      gain.gain.exponentialRampToValueAtTime(0.16, ctx.currentTime + at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + at + 0.16);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + at); osc.stop(ctx.currentTime + at + 0.18);
+    });
+    setTimeout(() => ctx.close(), 800);
+  } catch (e) { /* audio is a nicety; never let it break the page */ }
+}
+
+function renderAlerts(snap) {
+  const box = $("sysAlert");
+  if (snap.ok || !snap.active.length) {
+    box.style.display = "none";
+    alertState = { ok: true, lastCode: null };
+    document.title = "Moon — AI Gateway";
+    return;
+  }
+  const a = snap.active[0];
+  box.style.display = "";
+  box.classList.toggle("support", !!snap.needs_support);
+  box.querySelector(".sa-title").textContent =
+    (snap.needs_support ? "⚑ NEEDS SUPPORT — " : "⚑ ") + a.title;
+  box.querySelector(".sa-user").textContent = a.user_message;
+  box.querySelector(".sa-remedy").textContent =
+    (a.remedy ? "Fix: " + a.remedy + "  " : "") +
+    `· ${a.occurrences} request(s) affected · up ${Math.round(a.age_seconds)}s`;
+
+  // Sound only on a *new* condition, not on every poll — an alarm that repeats
+  // every two seconds is an alarm people mute.
+  if (a.code !== alertState.lastCode) beep();
+  alertState = { ok: false, lastCode: a.code };
+  document.title = "⚑ Moon — service unavailable";
+}
+
+async function refreshAlerts() {
+  try { renderAlerts(await (await fetch("/admin/alerts")).json()); }
+  catch (e) { /* the console must not add noise when the gateway is unwell */ }
+}
+$("alertAck").onclick = async () => {
+  await fetch("/admin/alerts/clear", { method:"POST" });
+  await refreshAlerts();
+};
+
 async function boot() {
   seedFanout();
   await refreshHealth(); await refreshCreds(); await refreshPool();
   await refreshFleet(); await refreshReputation(); await refreshBaselines();
+  await refreshAlerts();
+  // Poll, so the flag appears without anyone having to send a request.
+  setInterval(refreshAlerts, 5000);
   try {
     const p = await (await fetch("/admin/policy")).json();
     p.intents.forEach(i => { const o = document.createElement("option");

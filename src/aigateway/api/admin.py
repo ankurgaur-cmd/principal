@@ -128,6 +128,27 @@ async def effort_signals(request: Request) -> dict:
     return {"signals": reputation.effort.table(), "enabled": True}
 
 
+@router.get("/alerts")
+async def alerts(request: Request) -> dict:
+    """System alerts — the gateway saying it needs a human.
+
+    Polled by the console to decide whether to light the red flag and sound the
+    alarm. `ok` is the single boolean that answers "is anything wrong"; each
+    active alert carries `detail` for the operator and `user_message` in plain
+    language for whoever is on the other end of the agent.
+    """
+    return request.app.state.alerts.snapshot()
+
+
+@router.post("/alerts/clear")
+async def clear_alerts(request: Request) -> dict:
+    """Acknowledge and clear. Alerts also clear on their own when a request
+    succeeds; this is for the case where you have fixed it and want the flag
+    down without waiting for traffic."""
+    cleared = request.app.state.alerts.clear()
+    return {"cleared": cleared, **request.app.state.alerts.snapshot()}
+
+
 @router.get("/baselines")
 async def baselines(request: Request) -> dict:
     """What the console is colouring against.
@@ -184,6 +205,12 @@ async def switchboard(request: Request) -> dict:
 async def switch_model(model_key: str, body: SwitchUpdate, request: Request) -> dict:
     """Turn one model on or off. Takes effect on the next request."""
     request.app.state.switchboard.set_model(model_key, body.enabled)
+    # Turning something back on directly invalidates a "there is nothing left"
+    # alert, so the flag comes down immediately rather than waiting for the next
+    # served request. Health-caused alerts are untouched — a switch says nothing
+    # about whether the vendor is reachable.
+    request.app.state.alerts.clear("no_models_available:all_switched_off")
+    request.app.state.alerts.clear("no_models_available:pinned_model_switched_off")
     return request.app.state.switchboard.state()
 
 
@@ -191,12 +218,20 @@ async def switch_model(model_key: str, body: SwitchUpdate, request: Request) -> 
 async def switch_provider(provider: str, body: SwitchUpdate, request: Request) -> dict:
     """Turn a whole vendor on or off — the fastest way to test failover."""
     request.app.state.switchboard.set_provider(provider.lower(), body.enabled)
+    # Turning something back on directly invalidates a "there is nothing left"
+    # alert, so the flag comes down immediately rather than waiting for the next
+    # served request. Health-caused alerts are untouched — a switch says nothing
+    # about whether the vendor is reachable.
+    request.app.state.alerts.clear("no_models_available:all_switched_off")
+    request.app.state.alerts.clear("no_models_available:pinned_model_switched_off")
     return request.app.state.switchboard.state()
 
 
 @router.post("/switchboard/reset")
 async def switch_reset(request: Request) -> dict:
     request.app.state.switchboard.reset()
+    request.app.state.alerts.clear("no_models_available:all_switched_off")
+    request.app.state.alerts.clear("no_models_available:pinned_model_switched_off")
     return request.app.state.switchboard.state()
 
 

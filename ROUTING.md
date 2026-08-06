@@ -43,10 +43,17 @@ undoes an earlier one.
 `x_gateway.pin_model` returns that model with `pinned: true` and no scoring.
 An unknown key raises `NoCapableModel` rather than falling back silently.
 
-⚠️ **A pin skips the hard gates too.** Pin a model without tool support for a
-tool request and the vendor rejects it, not the router. That is deliberate — a
-pin is an instruction, not a suggestion — but it means a pin can fail in ways
-routed traffic cannot.
+⚠️ **A pin skips most hard gates.** Pin a model without tool support for a tool
+request and the vendor rejects it, not the router. That is deliberate — a pin is
+an instruction, not a suggestion — but it means a pin can fail in ways routed
+traffic cannot.
+
+📌 **The one exception is the operator switchboard, which outranks a pin.** A pin
+is a *caller* instruction; a switch is an *operator* decision about what this
+deployment may talk to right now. Anything else means "switched off" does not
+actually mean off at the one moment it has to be trustworthy. Health is
+deliberately *not* checked here — a breaker is a self-healing observation, and a
+caller naming a model explicitly is entitled to try it.
 
 Quality penalties are **not** applied (`apply_quality=False`). Reputation exists
 to change *choices*; there is no choice here, and applying it would only distort
@@ -122,8 +129,23 @@ the model.** The exclusion carries both the model's tier and the required tier s
 the explanation can say *"light-tier model; this task was judged to need heavy"*
 rather than implying the model is incompetent.
 
-**Empty candidate set → `NoCapableModel`**, listing every rejection reason. The
-router never silently downgrades below the floor to find something servable.
+**Empty candidate set → `NoModelsAvailable` (503)**, not 422. Nothing is wrong
+with the request — we have nothing to serve it with, and the status code is how a
+client knows retrying is sensible. The router never silently downgrades below the
+floor to find something servable.
+
+The error diagnoses *why*, because identical empty candidate sets need opposite
+responses: `all_switched_off` (an operator did this — one click to undo),
+`no_credentials` (config), `all_unhealthy` (breakers tripped; needs a human),
+`no_capable_model` (the request itself asks for something unavailable). Each
+carries a `remedy` for the operator and a plain-language `user_message` for
+whoever is on the other end of the agent, and raises a system alert.
+
+📌 **The same gates apply to the fallback chain.** They did not, once: the chain
+filtered on credentials and tier alone, so a model an operator had switched off
+could still be handed live traffic the moment the primary stumbled. The router
+refusing to route somewhere while the fallback goes there anyway only surfaces
+under failure — exactly when the switch has to be trustworthy.
 
 ---
 

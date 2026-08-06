@@ -231,13 +231,41 @@ class Router:
         effort = canonical.effort or policy.effort
         expected_output = min(canonical.max_tokens, _EXPECTED_OUTPUT.get(effort, 1500))
 
-        # 1. Explicit pin bypasses everything, but is still recorded.
+        # 1. Explicit pin bypasses the *scoring*, but not the operator.
+        #
+        # A pin is a caller instruction; a switch is an operator decision about
+        # what this deployment is allowed to talk to right now. The operator
+        # wins. Anything else means "switched off" does not actually mean off,
+        # and an operator who disabled a model to take it out of service would
+        # still be sending it traffic — which is the one moment the switch has
+        # to be trustworthy.
+        #
+        # Health is deliberately NOT checked here. A breaker is an observation
+        # that heals itself, and a caller who names a model explicitly is
+        # entitled to try it.
         if canonical.pin_model:
             model = get_model(canonical.pin_model)
             if model is None:
                 from ..errors import NoCapableModel
 
                 raise NoCapableModel(f"unknown model '{canonical.pin_model}'")
+            if self._switchboard:
+                if off := self._switchboard.reason(model.key, model.provider):
+                    from ..errors import NoModelsAvailable
+
+                    # 503, not 422: the model exists and the request is fine —
+                    # it is temporarily unavailable, so retrying is sensible.
+                    raise NoModelsAvailable(
+                        message=(
+                            f"'{model.key}' is pinned by the request but {off}. An "
+                            f"operator switch overrides a pin."
+                        ),
+                        cause="pinned_model_switched_off",
+                        remedy=(
+                            f"turn '{model.key}' back on in the console, or drop "
+                            f"pin_model so the router can choose an available one."
+                        ),
+                    )
             cost, cache_state, plan, raw, _ = self._cost(
                 model, prefix_tokens, volatile_tokens, expected_output, False,
                 apply_quality=False,
@@ -348,11 +376,20 @@ class Router:
             )
 
         if not candidates:
-            from ..errors import NoCapableModel
+            from ..errors import NoModelsAvailable
 
-            raise NoCapableModel(
-                f"no model satisfies intent '{intent}' at tier "
-                f"{required.name.lower()}: {'; '.join(rejected) or 'catalog empty'}"
+            # *Why* nothing is left decides both the remedy and whether a human
+            # needs waking. "You switched everything off" and "every breaker has
+            # tripped" produce identical empty candidate sets and could not be
+            # more different to act on.
+            cause, remedy = _diagnose_empty(excluded, required)
+            raise NoModelsAvailable(
+                message=(
+                    f"no model satisfies intent '{intent}' at tier "
+                    f"{required.name.lower()}: {'; '.join(rejected) or 'catalog empty'}"
+                ),
+                cause=cause,
+                remedy=remedy,
             )
 
         # 5. Escalation-only stickiness — but ONLY when there is a warm cache to
@@ -434,6 +471,46 @@ class Router:
             required_tier=required,
             intent=intent,
         )
+
+
+def _diagnose_empty(excluded: list[dict], required: Tier) -> tuple[str, str]:
+    """Work out why the candidate set is empty, and what would fix it.
+
+    Ordered by what an operator can act on fastest. A switch is one click; a
+    credential is a config change; a tripped breaker needs the vendor to
+    recover; a genuine capability gap needs the request to change.
+    """
+    kinds = [e.get("kind") for e in excluded if e.get("kind") != "tier"]
+    if not kinds:
+        return (
+            "no_capable_model",
+            f"nothing in the catalog sits at {required.name.lower()} tier or above. "
+            f"Add a model at that tier, or lower the floor for this intent.",
+        )
+    if all(k == "switched_off" for k in kinds):
+        return (
+            "all_switched_off",
+            "an operator has switched off every model that could serve this. "
+            "Turn one back on in the console, or POST /admin/switchboard/reset.",
+        )
+    if all(k == "no_credentials" for k in kinds):
+        return (
+            "no_credentials",
+            "no provider has credentials configured. Add a key in the console, "
+            "or set ANTHROPIC_API_KEY / OPENAI_API_KEY.",
+        )
+    if all(k in ("unhealthy", "switched_off", "no_credentials") for k in kinds):
+        return (
+            "all_unhealthy",
+            "every remaining model is out of rotation on failing health checks. "
+            "Breakers heal on their own; POST /admin/pool/reset to force them "
+            "closed if the vendor has recovered.",
+        )
+    return (
+        "no_capable_model",
+        "no model has the capabilities or capacity this request needs — check "
+        "context window, output length, tool support and structured outputs.",
+    )
 
 
 def _exclusion_kind(reason: str) -> str:

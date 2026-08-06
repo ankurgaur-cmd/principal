@@ -23,7 +23,7 @@ from .auth import Authenticator
 from .config import get_settings
 from .errors import GatewayError
 from .governance import BudgetGuard, CostLedger, RateLimiter
-from .observability import FleetStats, LatencyBaselines, RecordSink
+from .observability import AlertCentre, FleetStats, LatencyBaselines, RecordSink
 from .pipeline import GatewayPipeline
 from .providers import ProviderRegistry
 from .providers.health import HealthMonitor
@@ -93,6 +93,7 @@ def create_app() -> FastAPI:
     limiter = RateLimiter(settings, store)
     fleet = FleetStats()
     baselines = LatencyBaselines()
+    alerts = AlertCentre()
     sink = RecordSink(settings.record_path, fleet=fleet)
 
     app.state.settings = settings
@@ -109,10 +110,12 @@ def create_app() -> FastAPI:
     app.state.sink = sink
     app.state.fleet = fleet
     app.state.baselines = baselines
+    app.state.alerts = alerts
     app.state.auth = Authenticator(settings)
     app.state.pipeline = GatewayPipeline(
         settings, store, registry, router_, classifier, budget, limiter, ledger, sink,
         health=health, reputation=reputation, baselines=baselines,
+        switchboard=switchboard, alerts=alerts,
     )
 
     app.include_router(chat.router)

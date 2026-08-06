@@ -623,8 +623,14 @@ def test_preview_can_restrict_to_servable_models(client):
         "/admin/route/preview?include_unavailable=false",
         json={"model": "auto", "messages": [{"role": "user", "content": "Review this diff."}]},
     )
-    assert res.status_code == 422
-    assert "provider not configured" in res.json()["error"]["message"]
+    # 503, not 422: nothing is wrong with the request — we have nothing to
+    # serve it with. The status code is how a client knows retrying is sane.
+    assert res.status_code == 503
+    body = res.json()["error"]
+    assert "provider not configured" in body["message"]
+    assert body["cause"] == "no_credentials"
+    assert body["remedy"]
+    assert res.headers["retry-after"]
 
 
 def test_route_preview_spends_nothing(client):

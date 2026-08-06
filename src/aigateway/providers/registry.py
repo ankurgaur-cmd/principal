@@ -128,12 +128,27 @@ class ProviderRegistry:
             raise NoCapableModel(f"unknown model '{model_key}'")
         return self.get(spec.provider)
 
-    def fallback_chain(self, model: ModelSpec, max_hops: int = 2) -> list[ModelSpec]:
+    def fallback_chain(
+        self,
+        model: ModelSpec,
+        max_hops: int = 2,
+        *,
+        switchboard=None,
+        health=None,
+    ) -> list[ModelSpec]:
         """Ordered fallbacks for an upstream failure.
 
         Same vendor first, deliberately. A cross-vendor hop mid-conversation
         discards the warm prompt cache *and* any provider-native state, so it is
         reserved for the case where the whole vendor is unreachable.
+
+        **The same availability gates the router applies must apply here.** This
+        chain used to filter on credentials and tier alone, so a model an
+        operator had explicitly switched off — or one whose circuit breaker was
+        open — could still be handed live traffic the moment the primary
+        stumbled. The router refusing to route somewhere and the fallback going
+        there anyway is the worst kind of inconsistency: it only shows up under
+        failure, which is exactly when an operator is relying on the switch.
         """
         chain: list[ModelSpec] = []
 
@@ -161,4 +176,16 @@ class ProviderRegistry:
         )
         chain.extend(cross_vendor)
 
-        return [m for m in chain if m.provider in self._providers][:max_hops]
+        def available(m: ModelSpec) -> bool:
+            if m.provider not in self._providers:
+                return False
+            # An operator's decision outranks an observation, and both outrank
+            # convenience. Checked in that order for the same reason the router
+            # checks them in that order.
+            if switchboard is not None and not switchboard.is_enabled(m.key, m.provider):
+                return False
+            if health is not None and not health.is_available(m.key):
+                return False
+            return True
+
+        return [m for m in chain if available(m)][:max_hops]

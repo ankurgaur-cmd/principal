@@ -341,6 +341,12 @@ async def trace(body: ChatCompletionRequest, request: Request):
                                 "error": detail.get("message", str(exc.detail)),
                                 "code": detail.get("code", "error"),
                                 "status": exc.status_code,
+                                # Plain language for the person, the remedy for
+                                # the operator. Both, or one audience is served
+                                # the other's version.
+                                "user_message": detail.get("user_message", ""),
+                                "remedy": detail.get("remedy", ""),
+                                "cause": detail.get("cause", ""),
                             }
                         )
                         + "\n\n"
