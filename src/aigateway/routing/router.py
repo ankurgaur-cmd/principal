@@ -277,8 +277,8 @@ class Router:
                         ),
                         cause="pinned_model_switched_off",
                         remedy=(
-                            f"turn '{model.key}' back on in the console, or drop "
-                            f"pin_model so the router can choose an available one."
+                            f"Turn '{model.key}' back on, or drop pin_model and let "
+                            f"the router choose."
                         ),
                     )
             # Whether the session is already warm on this model matters just as
@@ -512,32 +512,28 @@ def _diagnose_empty(excluded: list[dict], required: Tier) -> tuple[str, str]:
     if not kinds:
         return (
             "no_capable_model",
-            f"nothing in the catalog sits at {required.name.lower()} tier or above. "
+            f"nothing in the catalog is at {required.name.lower()} tier or above. "
             f"Add a model at that tier, or lower the floor for this intent.",
         )
     if all(k == "switched_off" for k in kinds):
         return (
             "all_switched_off",
-            "an operator has switched off every model that could serve this. "
-            "Turn one back on in the console, or POST /admin/switchboard/reset.",
+            "Turn a model back on in the console, or POST /admin/switchboard/reset.",
         )
     if all(k == "no_credentials" for k in kinds):
         return (
             "no_credentials",
-            "no provider has credentials configured. Add a key in the console, "
-            "or set ANTHROPIC_API_KEY / OPENAI_API_KEY.",
+            "Add a key in the console, or set ANTHROPIC_API_KEY / OPENAI_API_KEY.",
         )
     if all(k in ("unhealthy", "switched_off", "no_credentials") for k in kinds):
         return (
             "all_unhealthy",
-            "every remaining model is out of rotation on failing health checks. "
-            "Breakers heal on their own; POST /admin/pool/reset to force them "
+            "Breakers heal on their own. POST /admin/pool/reset to force them "
             "closed if the vendor has recovered.",
         )
     return (
         "no_capable_model",
-        "no model has the capabilities or capacity this request needs — check "
-        "context window, output length, tool support and structured outputs.",
+        "Check context window, output length, tool support and structured outputs.",
     )
 
 

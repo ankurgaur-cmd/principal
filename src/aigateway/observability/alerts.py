@@ -83,48 +83,46 @@ def no_models_available(cause: str, detail: str, remedy: str) -> Alert:
     operator who switched everything off does not need paging — they need
     reminding. A fleet where every breaker has tripped does.
     """
+    # Wording rules for `user_message`, learned by writing a worse version
+    # first: one short sentence, calm, and no protesting. The earlier copy said
+    # "Someone has turned it off deliberately — it is not a fault, and nothing
+    # you did caused it", which is three clauses of reassurance nobody asked
+    # for, and insisting a user is not to blame is the fastest way to suggest
+    # they might be. State the situation, say what happens next, stop.
+    #
+    # The operator's version keeps every detail. Only this one is trimmed.
     friendly = {
         "all_switched_off": (
-            "Every model has been switched off",
-            "The AI service is paused right now. Someone has turned it off "
-            "deliberately — it is not a fault, and nothing you did caused it. "
-            "Please try again shortly.",
+            "Paused by an operator",
+            "The service is paused. Please try again shortly.",
             False,
         ),
         "all_unhealthy": (
             "Every model is failing health checks",
-            "We are having trouble reaching the AI service at the moment. This "
-            "is a problem on our side, not with your request. We are aware of it "
-            "and it should recover on its own — please try again in a few minutes.",
+            "We can't reach the service right now. Please try again in a few minutes.",
             True,
         ),
         "no_credentials": (
-            "No provider credentials are configured",
-            "The AI service is not set up yet. Nothing you did caused this — it "
-            "needs someone on our side to finish configuring it.",
+            "No provider credentials configured",
+            "The service isn't set up yet.",
             True,
         ),
         "pinned_model_switched_off": (
-            "A pinned model has been switched off",
-            "The specific AI model this request asked for is switched off right "
-            "now. Nothing you did caused it — it should be available again "
-            "shortly, or the request can be sent without naming a model.",
+            "A pinned model is switched off",
+            "That model is unavailable right now.",
             False,
         ),
         "no_capable_model": (
             "No model meets this request's requirements",
-            "This request needs a capability we cannot provide right now — it may "
-            "be too long, or need a feature that is unavailable. Try shortening it, "
-            "or get in touch if it keeps happening.",
+            "We can't handle this request as it stands — try shortening it.",
             False,
         ),
     }
     title, user_message, needs_support = friendly.get(
         cause,
         (
-            "No model is available to serve requests",
-            "The AI service is unavailable right now. This is a problem on our "
-            "side, not with your request. Please try again shortly.",
+            "No model is available",
+            "The service is unavailable right now. Please try again shortly.",
             True,
         ),
     )

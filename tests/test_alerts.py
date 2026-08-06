@@ -222,3 +222,43 @@ def test_snapshot_is_serialisable():
     centre = AlertCentre()
     centre.raise_alert(no_models_available("all_unhealthy", "d", "r"))
     json.dumps(centre.snapshot())
+
+
+# ==========================================================================
+# The wording itself
+# ==========================================================================
+def test_user_messages_are_short():
+    """An outage message competes for attention with the outage. One short
+    sentence survives being read; a paragraph gets skimmed."""
+    for cause in ("all_switched_off", "all_unhealthy", "no_credentials",
+                  "pinned_model_switched_off", "no_capable_model", "unmapped"):
+        msg = no_models_available(cause, "detail", "remedy").user_message
+        assert len(msg) <= 90, f"{cause}: {len(msg)} chars — {msg}"
+        assert msg.count(".") <= 2, f"{cause} runs to more than two sentences"
+
+
+def test_user_messages_do_not_protest_innocence():
+    """The first version said "Someone has turned it off deliberately — it is
+    not a fault, and nothing you did caused it". Insisting a user is not to
+    blame is the fastest way to suggest they might be."""
+    for cause in ("all_switched_off", "all_unhealthy", "no_credentials",
+                  "pinned_model_switched_off", "no_capable_model"):
+        msg = no_models_available(cause, "d", "r").user_message.lower()
+        for phrase in ("nothing you did", "not your fault", "not a fault",
+                       "deliberately", "we are aware", "we're aware"):
+            assert phrase not in msg, f"{cause} still protests: {phrase!r}"
+
+
+def test_the_operator_keeps_every_detail():
+    """Only the user-facing line is trimmed. Shortening the operator's version
+    would be losing the diagnosis, not being concise."""
+    alert = no_models_available("all_unhealthy", "the full technical detail", "r")
+    assert alert.detail == "the full technical detail"
+    assert len(alert.detail) >= len(alert.user_message) - 60
+
+
+def test_a_deliberate_pause_is_not_dressed_up_as_an_incident():
+    """Colouring an operator's own action as a fault is how a flag stops
+    meaning anything."""
+    assert no_models_available("all_switched_off", "d", "r").needs_support is False
+    assert no_models_available("all_unhealthy", "d", "r").needs_support is True

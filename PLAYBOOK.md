@@ -293,19 +293,18 @@ end user something useful.
 - Tab title becomes `⚑ Moon — service unavailable`
 - **503** with `retry-after`, not a 422
 
-Three separate messages, for three different readers:
+Three lines, for three different readers:
 
 ```
-FLAG : Every model has been switched off
-USER : The AI service is paused right now. Someone has turned it off
-       deliberately — it is not a fault, and nothing you did caused it.
-FIX  : an operator has switched off every model that could serve this.
-       Turn one back on in the console, or POST /admin/switchboard/reset.
+TITLE : Paused by an operator
+USER  : The service is paused. Please try again shortly.
+FIX   : Turn a model back on in the console, or POST /admin/switchboard/reset.
 ```
 
-**Note:** switching everything off does **not** set `needs_support`. It is a
-deliberate action, not an incident. Remove your API keys instead and you will see
-`needs_support: true` — that one nobody chose.
+**Note the amber dot, not red.** Switching everything off does not set
+`needs_support` — it is a deliberate action, not an incident, and colouring it
+like one is how a flag stops meaning anything. Remove your API keys instead and
+the dot goes red with `needs_support: true`: that one nobody chose.
 
 **Recovery:** turn a vendor back on; the flag clears immediately.
 
