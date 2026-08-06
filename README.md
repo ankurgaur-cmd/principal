@@ -19,7 +19,8 @@ prompt cache** — which is the part naive routers get wrong.
 Design rationale, decision records (D1–D26), failure modes, and known gaps:
 **[ARCHITECTURE.md](ARCHITECTURE.md)**. How the gateway decides what you asked
 for: **[CLASSIFICATION.md](CLASSIFICATION.md)**. How it then picks a model:
-**[ROUTING.md](ROUTING.md)**.
+**[ROUTING.md](ROUTING.md)**. Ready-made scenarios for checking any of it
+yourself: **[PLAYBOOK.md](PLAYBOOK.md)**.
 
 ---
 

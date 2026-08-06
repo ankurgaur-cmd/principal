@@ -317,9 +317,24 @@ async def route_preview(
     canonical = canonicalise(body)
     prefix_tokens, volatile_tokens = estimate_request_tokens(canonical)
     intent = await app.state.classifier.classify(canonical, prefix_tokens, volatile_tokens)
-    decision = await app.state.router.route(
+
+    # Apply the tenant's budget ceiling, exactly as the serving path would. A
+    # preview that ignored it would not be previewing the routing you actually
+    # get — the same argument that makes the switchboard apply on dry runs. The
+    # check is read-only: it never records spend.
+    principal = await app.state.auth.authenticate(request)
+    dry = await app.state.router.route(
         canonical, intent.intent, require_available=not include_unavailable
     )
+    verdict = await app.state.budget.check(principal.tenant_id, dry.estimated_cost_usd)
+    decision = dry
+    if verdict.tier_ceiling is not None:
+        decision = await app.state.router.route(
+            canonical,
+            intent.intent,
+            cost_ceiling_tier=verdict.tier_ceiling,
+            require_available=not include_unavailable,
+        )
 
     from ..routing import explain as explain_decision
 
@@ -342,6 +357,15 @@ async def route_preview(
             "cache_state": decision.cache_state,
             "cache_plan": decision.cache_plan.reason,
             "estimated_cost_usd": round(decision.estimated_cost_usd, 6),
+            # How the decision was reached, not just what it was. Omitting these
+            # made a dry run unable to show a pin, a degrade or a sticky
+            # session — the three cases where the answer is *not* "cheapest
+            # capable model" and you most want to know why.
+            "pinned": decision.pinned,
+            "degraded": decision.degraded,
+            "sticky": decision.sticky,
+            "required_tier": decision.required_tier.name.lower(),
+            "escalated_from": decision.escalated_from,
         },
         "considered": [
             {
