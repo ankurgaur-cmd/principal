@@ -20,6 +20,7 @@ worse than one that abstains.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -265,6 +266,7 @@ class IntentClassifier:
         model_key: str = "claude-haiku-4-5",
         min_confidence: float = 0.6,
         embedder: Embedder | None = None,
+        timeout_seconds: float = 4.0,
     ):
         self._store = store
         self._registry = provider_registry
@@ -272,6 +274,7 @@ class IntentClassifier:
         self._model_key = model_key
         self._min_confidence = min_confidence
         self._embedder = embedder or NullEmbedder()
+        self._timeout_seconds = timeout_seconds
 
     async def classify(
         self, canonical, prefix_tokens: int, volatile_tokens: int
@@ -300,6 +303,15 @@ class IntentClassifier:
 
         # L1 — rules.
         result = classify_by_rules(canonical, prefix_tokens, volatile_tokens)
+
+        # A pinned request has already decided which model serves it, and the
+        # router bypasses intent-based selection entirely for it. Paying a full
+        # upstream round trip to L3 would buy nothing but a nicer label for the
+        # reputation bucket — measured at ~1.5s, on 100% of pinned traffic.
+        if canonical.pin_model:
+            return result or IntentResult(
+                "unknown", 0.3, "default", "pinned request; intent not needed to route"
+            )
         if result and result.confidence >= self._min_confidence:
             return result
 
@@ -399,12 +411,26 @@ class IntentClassifier:
 
         try:
             provider = self._registry.for_model(self._model_key)
-            raw = await provider.classify(
-                model_key=self._model_key,
-                system=_CLASSIFIER_SYSTEM,
-                text=text,
-                schema=_CLASSIFIER_SCHEMA,
+            # A hard ceiling of our own. The classifier sits in front of the
+            # call it is labelling, so a slow one delays every request and
+            # inflates time-to-first-token — the number a drop-in gateway is
+            # judged on. Better to fall back to the rules guess than to let a
+            # degraded classifier set the floor for the whole gateway.
+            raw = await asyncio.wait_for(
+                provider.classify(
+                    model_key=self._model_key,
+                    system=_CLASSIFIER_SYSTEM,
+                    text=text,
+                    schema=_CLASSIFIER_SCHEMA,
+                ),
+                timeout=self._timeout_seconds,
             )
+        except TimeoutError:
+            log.warning(
+                "llm classifier exceeded %.1fs; falling back to the rules guess",
+                self._timeout_seconds,
+            )
+            return None
         except Exception as exc:
             # A classifier failure must never fail the request it was labelling.
             log.warning("llm classifier failed: %s", exc)

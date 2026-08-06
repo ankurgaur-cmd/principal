@@ -428,3 +428,50 @@ def test_the_fallback_intent_is_never_the_cheapest_tier():
     """Abstention must not be a discount. If the classifier does not know what
     the work is, guessing light is the expensive kind of wrong."""
     assert INTENT_POLICY["unknown"].min_tier >= Tier.STANDARD
+
+
+# ==========================================================================
+# Latency — the gateway sits in front of the call it is labelling
+# ==========================================================================
+async def test_a_pinned_request_never_pays_for_the_llm_layer(store, registry):
+    """A pin has already decided which model serves the request, and the router
+    bypasses intent-based selection for it. Paying a full upstream round trip
+    (~1.5s, measured) to get a nicer reputation label is a pure latency tax on
+    100% of pinned traffic."""
+    classifier = IntentClassifier(store, registry, min_confidence=MIN_CONFIDENCE)
+    canonical = req("qwerty asdf zxcv")          # nothing L1 can label
+    canonical.pin_model = "gpt-5"
+
+    result = await classifier.classify(canonical, 5_000, 100)
+
+    assert registry.provider.calls == [], "L3 must not fire for a pinned request"
+    assert result.intent in INTENT_POLICY
+    assert "pinned" in result.rationale
+
+
+async def test_an_unpinned_request_still_reaches_the_llm_layer(store, registry):
+    classifier = IntentClassifier(store, registry, min_confidence=MIN_CONFIDENCE)
+    await classifier.classify(req("qwerty asdf zxcv"), 5_000, 100)
+    assert registry.provider.calls, "L3 is still the fallback when it is needed"
+
+
+async def test_a_slow_classifier_cannot_hold_up_the_request(store, registry):
+    """The classifier runs before the call it labels, so a degraded one delays
+    every request and inflates time-to-first-token. Better a rules guess than a
+    gateway whose floor is set by its slowest optional component."""
+    import asyncio
+
+    async def never_returns(**kw):
+        await asyncio.sleep(30)
+
+    registry.provider.classify = never_returns
+    classifier = IntentClassifier(
+        store, registry, min_confidence=MIN_CONFIDENCE, timeout_seconds=0.05
+    )
+
+    started = asyncio.get_running_loop().time()
+    result = await classifier.classify(req("qwerty asdf zxcv"), 5_000, 100)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 1.0, f"the timeout did not fire (took {elapsed:.2f}s)"
+    assert result.intent in INTENT_POLICY
