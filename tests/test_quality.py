@@ -51,7 +51,7 @@ async def test_empty_answer_from_exhausted_budget_is_a_failure(router, decision)
     assert check.id == "reasoning_starved"
     # The message has to say what to do about it, not just that it happened,
     # and quote the floor for the effort actually used.
-    assert str(REASONING_FLOOR_BY_EFFORT[decision.effort]) in check.detail
+    assert str(REASONING_FLOOR_BY_EFFORT[decision.effort]) in check.detail.replace(",", "")
     assert "max_tokens" in check.detail
 
 
@@ -170,12 +170,31 @@ def test_a_budget_under_the_lowest_floor_is_flagged_before_the_call():
     assert budget_starves_the_answer(8000) is False
 
 
+def test_a_budget_exactly_at_the_floor_does_not_keep_its_effort():
+    """The bug a user hit: 8,000 tokens at effort 'high' against a floor of
+    8,000. Arithmetically there is nothing left for the answer, but the check
+    read as satisfied and the request came back empty."""
+    from aigateway.quality import REASONING_FLOOR_BY_EFFORT as F
+
+    assert effort_that_fits("high", F["high"]) == "medium"
+    assert effort_that_fits("medium", F["medium"]) == "low"
+
+
+def test_the_suggested_budget_is_never_the_one_that_just_failed():
+    """The advice was "raise max_tokens above ~8000 for effort 'high'" to
+    someone who had sent exactly 8,000 — circular, and still wrong."""
+    from aigateway.quality import budget_for_effort
+
+    for effort in ("low", "medium", "high", "xhigh", "max"):
+        assert budget_for_effort(effort) > REASONING_FLOOR_BY_EFFORT[effort]
+
+
 def test_effort_steps_down_to_fit_the_budget():
     """Respects the caller's cap rather than raising it — their budget is their
     decision, how much goes to reasoning is ours."""
-    assert effort_that_fits("high", 8000) == "high"
-    assert effort_that_fits("high", 5000) == "medium"
-    assert effort_that_fits("high", 3000) == "low"
+    assert effort_that_fits("high", 9500) == "high"
+    assert effort_that_fits("high", 6500) == "medium"
+    assert effort_that_fits("high", 4500) == "low"
     assert effort_that_fits("max", 100) == "low", "never below the bottom rung"
 
 

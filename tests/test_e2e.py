@@ -292,19 +292,31 @@ def test_light_work_gets_a_smaller_budget_than_heavy_work(client):
     assert policy_for("code_review").max_tokens < policy_for("architecture").max_tokens
 
 
-def test_every_intent_has_a_budget_above_its_reasoning_floor(client):
-    """A policy budget below the floor for its own effort guarantees an empty
-    answer — the gateway would be shipping a default that cannot work."""
-    from aigateway.quality import REASONING_FLOOR_BY_EFFORT
+def test_every_intent_leaves_room_for_an_answer(client):
+    """This test used to assert `>= floor` and passed while shipping a default
+    that could not work: the floor is what *reasoning* spends, so a budget equal
+    to it leaves exactly nothing to reply with. code_review shipped at 8,000
+    against a `high` floor of 8,000 and returned empty on a large query, with
+    every check reporting the budget as adequate. The gap is the assertion."""
+    from aigateway.quality import budget_for_effort, effort_that_fits
     from aigateway.routing.policy import INTENT_POLICY
 
     for policy in INTENT_POLICY.values():
-        floor = REASONING_FLOOR_BY_EFFORT[policy.effort]
-        if policy.min_tier.name != "LIGHT":
-            assert policy.max_tokens >= floor, (
-                f"{policy.intent}: budget {policy.max_tokens} is below the "
-                f"{floor} floor for effort '{policy.effort}'"
-            )
+        if policy.min_tier.name == "LIGHT":
+            # Deliberate exception: the floors were measured on demanding
+            # prompts, and a classify genuinely finishes in ~150 tokens.
+            continue
+        need = budget_for_effort(policy.effort)
+        assert policy.max_tokens >= need, (
+            f"{policy.intent}: budget {policy.max_tokens} leaves no room for an "
+            f"answer at effort '{policy.effort}' (needs {need})"
+        )
+        # And the budget must actually sustain the effort the policy asked for,
+        # or the policy is quietly asking for depth it cannot pay for.
+        assert effort_that_fits(policy.effort, policy.max_tokens) == policy.effort, (
+            f"{policy.intent}: budget {policy.max_tokens} silently downgrades "
+            f"effort '{policy.effort}'"
+        )
 
 
 def test_health_publishes_the_switches(client):

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from ..cache.hints import CachePlan, plan_cache
 from ..catalog import Capability, ModelSpec, Tier, get_model
 from ..config import Settings
+from ..quality import effort_that_fits
 from ..tokens import estimate_request_tokens
 from .policy import policy_for, tier_from_name
 
@@ -243,7 +244,12 @@ class Router:
         prefix_tokens, volatile_tokens = estimate_request_tokens(canonical)
         total = prefix_tokens + volatile_tokens
         policy = policy_for(intent)
-        effort = canonical.effort or policy.effort
+        # Report the effort that will actually be used, not the one asked for.
+        # The provider steps effort down when the budget cannot sustain it, so a
+        # decision claiming `high` while `medium` was sent is a trace that
+        # disagrees with the request it describes — and it is the field the
+        # reasoning-starvation message quotes back at you.
+        effort = effort_that_fits(canonical.effort or policy.effort, canonical.max_tokens)
         expected_output = min(canonical.max_tokens, _EXPECTED_OUTPUT.get(effort, 1500))
 
         # 1. Explicit pin bypasses the *scoring*, but not the operator.

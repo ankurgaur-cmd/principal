@@ -115,3 +115,21 @@ async def test_a_pinned_request_still_notices_a_warm_session(router):
     assert second.pinned is True
     assert second.cache_state == "warm_read"
     assert second.estimated_cost_usd < first.estimated_cost_usd
+
+
+async def test_the_decision_reports_the_effort_that_will_actually_be_used(router):
+    """The provider steps effort down when the budget cannot sustain it, so a
+    decision claiming `high` while `medium` was sent describes a request that
+    was never made — and `effort` is the field the reasoning-starvation message
+    quotes back at the caller."""
+    from aigateway.quality import budget_for_effort
+
+    generous = await router.route(
+        make_request(effort="high", max_tokens=budget_for_effort("high")), "code_review"
+    )
+    assert generous.effort == "high"
+
+    tight = await router.route(
+        make_request(effort="high", max_tokens=budget_for_effort("medium")), "code_review"
+    )
+    assert tight.effort == "medium", "claimed high, would have sent medium"

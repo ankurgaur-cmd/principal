@@ -60,8 +60,25 @@ REASONING_FLOOR_BY_EFFORT = {
 # Kept for the medium default and for callers that do not know the effort.
 REASONING_OUTPUT_FLOOR = REASONING_FLOOR_BY_EFFORT["medium"]
 
+# Room the answer itself needs, on top of whatever reasoning consumes.
+#
+# The floors above are what reasoning *spends*, so a budget equal to a floor
+# leaves exactly nothing for the reply. That is not a theoretical edge: the
+# policy table shipped `code_review` at 8,000 against a `high` floor of 8,000 —
+# zero headroom, and a request that used its whole allowance thinking returned
+# empty while every check said the budget was adequate. `effort_that_fits` must
+# therefore require floor + room, never floor alone.
+MIN_VISIBLE_ANSWER_TOKENS = 1500
+
 # Effort levels ordered cheapest-first, for stepping down to fit a budget.
 EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"]
+
+
+def budget_for_effort(effort: str) -> int:
+    """Smallest max_tokens that can support this effort *and* an answer."""
+    return REASONING_FLOOR_BY_EFFORT.get(effort, REASONING_OUTPUT_FLOOR) + (
+        MIN_VISIBLE_ANSWER_TOKENS
+    )
 
 
 def budget_starves_the_answer(max_tokens: int) -> bool:
@@ -85,7 +102,7 @@ def effort_that_fits(effort: str, max_tokens: int) -> str:
     if effort not in EFFORT_LADDER:
         return effort
     for level in reversed(EFFORT_LADDER[: EFFORT_LADDER.index(effort) + 1]):
-        if max_tokens >= REASONING_FLOOR_BY_EFFORT[level]:
+        if max_tokens >= budget_for_effort(level):
             return level
     return "low"
 
@@ -143,16 +160,28 @@ def assess(canonical, response, decision) -> QualityReport:
     # --- did we get anything at all? -------------------------------------
     if not text and not has_tools:
         if finish == "length":
+            # Quote a number the caller can actually use. The first version said
+            # "raise max_tokens above ~8000 for effort 'high'" to someone who had
+            # sent exactly 8000 — advice that is both circular and, at the floor
+            # itself, still wrong.
+            spent = response.usage.completion_tokens
+            suggestion = max(budget_for_effort(decision.effort), int(spent * 1.6))
+            lower = EFFORT_LADDER[max(0, EFFORT_LADDER.index(decision.effort) - 1)] if (
+                decision.effort in EFFORT_LADDER
+            ) else "low"
             report.checks.append(
                 Check(
                     "reasoning_starved",
                     "fail",
                     "Empty answer — the output budget was spent on reasoning",
-                    f"The model used all {response.usage.completion_tokens} output "
-                    f"tokens on internal reasoning and produced no visible reply. "
-                    f"Raise max_tokens above ~{floor} for effort "
-                    f"'{decision.effort}', or lower the effort so more of the "
-                    f"budget goes to the answer.",
+                    f"The model spent all {spent:,} output tokens on internal "
+                    f"reasoning and produced no visible reply. At effort "
+                    f"'{decision.effort}' this needs about {suggestion:,} tokens "
+                    f"— reasoning alone typically takes "
+                    f"{REASONING_FLOOR_BY_EFFORT.get(decision.effort, floor):,} "
+                    f"before a single visible character. Either set "
+                    f"max_tokens={suggestion:,}, or drop to effort '{lower}' and "
+                    f"more of the same budget goes to the answer.",
                 )
             )
         else:

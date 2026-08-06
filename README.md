@@ -77,8 +77,12 @@ consumed *before a single visible character*:
 | high | 6,080 | 3,886 |
 
 **So the safest thing you can do is send no `max_tokens` at all.** The gateway
-then sizes the budget from the classified intent — 600 for a `classify`, 8,000
-for a `code_review`, 14,000 for `architecture`. A budget you send always wins.
+then sizes the budget from the classified intent — 600 for a `classify`, 10,000
+for a `code_review`, 16,000 for `architecture`. A budget you send always wins.
+
+Note those numbers exceed the table above on purpose: reasoning has to finish
+*and* leave room to answer. A budget equal to the reasoning cost reads as
+adequate and is guaranteed to return nothing.
 
 That column is also the main **latency** control, because output budget is what a
 request actually spends its wall-clock on:

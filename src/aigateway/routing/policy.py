@@ -57,41 +57,41 @@ INTENT_POLICY: dict[str, IntentPolicy] = {
     ),
     # ---- standard: most production traffic ----
     "qa": IntentPolicy(
-        "qa", Tier.STANDARD, "medium", max_tokens=5000, notes="grounded question answering"
+        "qa", Tier.STANDARD, "medium", max_tokens=7000, notes="grounded question answering"
     ),
-    "chat": IntentPolicy("chat", Tier.STANDARD, "medium", max_tokens=5000),
+    "chat": IntentPolicy("chat", Tier.STANDARD, "medium", max_tokens=7000),
     "plan": IntentPolicy(
-        "plan", Tier.STANDARD, "high", max_tokens=8000, escalate_on_tools=True,
+        "plan", Tier.STANDARD, "high", max_tokens=10000, escalate_on_tools=True,
         notes="decompose a task"
     ),
     "tool_orchestration": IntentPolicy(
-        "tool_orchestration", Tier.STANDARD, "high", max_tokens=8000,
+        "tool_orchestration", Tier.STANDARD, "high", max_tokens=10000,
         notes="multi-tool sequencing"
     ),
-    "analysis": IntentPolicy("analysis", Tier.STANDARD, "high", max_tokens=8000),
+    "analysis": IntentPolicy("analysis", Tier.STANDARD, "high", max_tokens=10000),
     "code_write": IntentPolicy(
-        "code_write", Tier.STANDARD, "high", max_tokens=8000, escalate_on_tools=True
+        "code_write", Tier.STANDARD, "high", max_tokens=10000, escalate_on_tools=True
     ),
     # ---- heavy: reasoning depth is the product ----
     "code_review": IntentPolicy(
         "code_review",
         Tier.HEAVY,
         "high",
-        max_tokens=8000,
+        max_tokens=10000,
         notes="recall matters; do not filter severity at the finding stage",
     ),
-    "hard_debug": IntentPolicy("hard_debug", Tier.HEAVY, "xhigh", max_tokens=14000),
-    "architecture": IntentPolicy("architecture", Tier.HEAVY, "xhigh", max_tokens=14000),
+    "hard_debug": IntentPolicy("hard_debug", Tier.HEAVY, "xhigh", max_tokens=16000),
+    "architecture": IntentPolicy("architecture", Tier.HEAVY, "xhigh", max_tokens=16000),
     "long_horizon_agentic": IntentPolicy(
         "long_horizon_agentic",
         Tier.HEAVY,
         "xhigh",
-        max_tokens=16000,
+        max_tokens=18000,
         notes="give the full spec up front; expect multi-minute turns",
     ),
     # ---- fallback ----
     "unknown": IntentPolicy(
-        "unknown", Tier.STANDARD, "medium", max_tokens=5000,
+        "unknown", Tier.STANDARD, "medium", max_tokens=7000,
         notes="classifier abstained; middle tier is safest"
     ),
 }
