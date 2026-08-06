@@ -145,6 +145,7 @@ class GatewayPipeline:
         baselines: LatencyBaselines | None = None,
         switchboard=None,
         alerts: AlertCentre | None = None,
+        cache_effectiveness=None,
     ):
         self._s = settings
         self._store = store
@@ -165,6 +166,7 @@ class GatewayPipeline:
         # request that succeeds. Recovery is detected from real traffic rather
         # than a probe, like the circuit breaker.
         self.alerts = alerts or AlertCentre()
+        self._cache_effectiveness = cache_effectiveness
         self.pilot = CachePilot(
             store, enabled=settings.cache_pilot_enabled, wait_ms=settings.cache_pilot_wait_ms
         )
@@ -555,6 +557,16 @@ class GatewayPipeline:
         # Feed the outcome back into routing. This is the loop that lets the
         # router learn a cheap model is bad at *this* task, rather than being
         # told so by configuration.
+        # Did the cache the router priced actually turn up? Only requests that
+        # expected a hit are evidence — a cold write returning nothing cached is
+        # correct, and counting it would condemn every model on first use.
+        if self._cache_effectiveness is not None:
+            self._cache_effectiveness.record(
+                model_used.key,
+                expected_hit=decision.cache_state == "warm_read",
+                cached_tokens=response.usage.cache_read_tokens,
+            )
+
         # A served request is proof the fleet is reachable again. Recovery is
         # observed, not probed — the same principle as the circuit breaker.
         self.alerts.clear("no_models_available")

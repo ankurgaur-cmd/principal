@@ -86,6 +86,7 @@ class Router:
         health=None,
         switchboard=None,
         reputation=None,
+        cache_effectiveness=None,
     ):
         """``providers`` is a live source of enabled provider names.
 
@@ -107,6 +108,11 @@ class Router:
         # Optional: observed quality per (model, intent). Makes a model that
         # keeps failing a given task more expensive to choose.
         self._reputation = reputation
+        # Optional: whether a model actually delivers the cache we price it for.
+        # Without this the router discounts a warm read that never arrives, and
+        # since it picks the cheapest candidate, a model that fails to cache is
+        # favoured by the very discount it does not earn.
+        self._cache_effectiveness = cache_effectiveness
 
     @property
     def _providers(self) -> set[str]:
@@ -145,6 +151,15 @@ class Router:
         apply_quality: bool = True,
     ) -> tuple[float, str, CachePlan, float, float]:
         plan = plan_cache_for(model, prefix_tokens, volatile_tokens)
+        if (
+            plan.cacheable
+            and self._cache_effectiveness is not None
+            and not self._cache_effectiveness.delivers(model.key)
+        ):
+            # Observed: this model does not return cached tokens. Price it for
+            # what it actually does, not for what the catalog says it supports.
+            plan.cacheable = False
+            plan.reason = "observed: this model does not return cached tokens"
         # Rates can step up past a context threshold (OpenAI roughly doubles
         # above 272K; Anthropic has no such premium). Using the headline rate
         # for a large-context request under-prices it by 2x, which is exactly
@@ -266,8 +281,21 @@ class Router:
                             f"pin_model so the router can choose an available one."
                         ),
                     )
+            # Whether the session is already warm on this model matters just as
+            # much for a pin as for a routed request. Hardcoding False here made
+            # every pinned request report `cold_write` however many times it had
+            # run — so the reported cache state was wrong, the cost estimate was
+            # inflated by a write premium already paid, and the effectiveness
+            # learner never saw a single pinned request because it only counts
+            # requests where a hit was expected.
+            pinned_warm = await self.warm_model_for(canonical.session_id)
+            is_warm = bool(
+                self._s.cache_aware_routing
+                and pinned_warm is not None
+                and pinned_warm.key == model.key
+            )
             cost, cache_state, plan, raw, _ = self._cost(
-                model, prefix_tokens, volatile_tokens, expected_output, False,
+                model, prefix_tokens, volatile_tokens, expected_output, is_warm,
                 apply_quality=False,
             )
             return RoutingDecision(

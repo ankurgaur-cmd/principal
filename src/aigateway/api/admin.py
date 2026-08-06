@@ -128,6 +128,24 @@ async def effort_signals(request: Request) -> dict:
     return {"signals": reputation.effort.table(), "enabled": True}
 
 
+@router.get("/cache/effectiveness")
+async def cache_effectiveness(request: Request) -> dict:
+    """Whether each model actually delivers the cache the router prices it for.
+
+    Published because the router discounts input cost by ~90% on the strength of
+    an assumed warm read. A model that never returns cached tokens is favoured by
+    a discount it does not earn, and that is invisible unless the assumption is
+    checked against what the vendor actually returned.
+    """
+    from ..cache.effectiveness import DEAD_CACHE_RATE, MIN_SAMPLES
+
+    return {
+        "min_samples": MIN_SAMPLES,
+        "dead_cache_rate": DEAD_CACHE_RATE,
+        "models": request.app.state.cache_effectiveness.snapshot(),
+    }
+
+
 @router.get("/alerts")
 async def alerts(request: Request) -> dict:
     """System alerts — the gateway saying it needs a human.

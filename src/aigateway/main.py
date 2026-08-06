@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .api import admin, chat, credentials, demo, models
 from .auth import Authenticator
+from .cache import CacheEffectiveness
 from .config import get_settings
 from .errors import GatewayError
 from .governance import BudgetGuard, CostLedger, RateLimiter
@@ -71,6 +72,8 @@ def create_app() -> FastAPI:
     # The registry is passed live, not snapshotted — credentials can be added
     # at runtime via the console, and routing must pick that up immediately.
     switchboard = Switchboard()
+    # Checked by the router before it discounts anything for a cache.
+    cache_effectiveness = CacheEffectiveness()
     reputation = Reputation(
         window=settings.quality_window,
         min_samples=settings.quality_min_samples,
@@ -80,6 +83,7 @@ def create_app() -> FastAPI:
     router_ = Router(
         settings, store, registry,
         health=health, switchboard=switchboard, reputation=reputation,
+        cache_effectiveness=cache_effectiveness,
     )
     classifier = IntentClassifier(
         store,
@@ -111,11 +115,13 @@ def create_app() -> FastAPI:
     app.state.fleet = fleet
     app.state.baselines = baselines
     app.state.alerts = alerts
+    app.state.cache_effectiveness = cache_effectiveness
     app.state.auth = Authenticator(settings)
     app.state.pipeline = GatewayPipeline(
         settings, store, registry, router_, classifier, budget, limiter, ledger, sink,
         health=health, reputation=reputation, baselines=baselines,
         switchboard=switchboard, alerts=alerts,
+        cache_effectiveness=cache_effectiveness,
     )
 
     app.include_router(chat.router)

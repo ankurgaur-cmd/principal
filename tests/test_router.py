@@ -96,3 +96,22 @@ async def test_nothing_available_is_a_503_not_a_422(settings, store):
     assert exc.value.cause == "no_credentials"
     assert exc.value.remedy, "an alert nobody can act on is just noise"
     assert exc.value.headers["retry-after"]
+
+
+async def test_a_pinned_request_still_notices_a_warm_session(router):
+    """The pin path hardcoded is_warm=False, so a pinned model reported
+    `cold_write` on every turn however many times the session had used it —
+    wrong cache state, a cost estimate inflated by a write premium already paid,
+    and no evidence at all reaching the cache-effectiveness learner, which only
+    counts requests where a hit was expected."""
+    req = make_request(session_id="pin-warm", system_tokens=20_000, pin_model="claude-opus-5")
+
+    first = await router.route(req, "code_write")
+    assert first.cache_state == "cold_write"
+
+    await router.remember("pin-warm", first.model)
+    second = await router.route(req, "code_write")
+
+    assert second.pinned is True
+    assert second.cache_state == "warm_read"
+    assert second.estimated_cost_usd < first.estimated_cost_usd

@@ -88,7 +88,13 @@ button.sm{padding:4px 10px;font-size:12px}
 .cnode span{font-size:11.5px;color:var(--text-secondary);line-height:1.4}
 .carrow{display:flex;align-items:center;padding:0 7px;color:var(--baseline);font-size:16px}
 @media (max-width:860px){.carrow{transform:rotate(90deg);padding:3px 0}}
-.flow{display:grid;grid-template-columns:repeat(5,1fr);align-items:stretch}
+/* Four nodes and three connectors — SEVEN children, not five. The grid was
+   declared `repeat(5,1fr)`, so it wrapped after the fifth child and dropped
+   node 4 onto a second row underneath node 2, which read as the pipeline
+   running out of order. Connectors are `auto` so they stay narrow and the
+   four nodes share the remaining width equally. */
+.flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr;
+  align-items:stretch;gap:0}
 @media (max-width:900px){.flow{grid-template-columns:1fr}}
 .node{border:1px solid var(--border);border-radius:8px;padding:11px 12px;background:var(--page);
   min-height:96px;position:relative;transition:border-color .2s,box-shadow .2s,opacity .2s}
@@ -499,6 +505,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--text-secondary)}
             <div class="answer" id="answer">—</div></div>
         </div>
         <div id="qualityChecks"></div>
+        <div id="cacheNote"></div>
         <div class="tiles" style="margin-top:12px">
           <div class="tile"><div class="k">Cost</div><div class="v" id="mCost">—</div></div>
           <div class="tile"><div class="k">Latency</div><div class="v" id="mLat">—</div></div>
@@ -1372,6 +1379,7 @@ function render(data) {
   $("mIn").textContent = data.usage.prompt_tokens.toLocaleString();
   $("mCached").innerHTML = data.usage.cache_read_tokens.toLocaleString()
     + (data.usage.cache_write_tokens?`<small> (+${data.usage.cache_write_tokens.toLocaleString()} written)</small>`:"");
+  renderCacheNote(data, g);
   $("answer").textContent = data.choices[0].message.content || "(empty — see the checks above)";
   totals.n++; totals.spend += g.actual_cost_usd; totals.saved += g.cache_savings_usd;
   totals.read += data.usage.cache_read_tokens; totals.prompt += data.usage.prompt_tokens;
@@ -1723,6 +1731,45 @@ $("fanCtx") && ($("fanCtx").oninput = () => {
   $("fanCtxSize").innerHTML = `prefix &asymp; <b>${n.toLocaleString()} tokens</b>`;
 });
 
+
+/* A cache reading zero is the single most reported "bug" here, and it is
+   almost never a bug — it is a prefix below the model's minimum, a first
+   request that has nothing to read yet, or a model that genuinely does not
+   return cached tokens. A bare 0 cannot distinguish those, so say which. */
+function renderCacheNote(data, g) {
+  const el = $("cacheNote"); if (!el) return;
+  const read = data.usage.cache_read_tokens, wrote = data.usage.cache_write_tokens;
+  const state = (g.cache_state || "").split(" ")[0];
+  const prefix = g.prefix_tokens_est ?? 0;
+  let cls = "hint", msg;
+
+  if (read > 0) {
+    cls = "verdict pass";
+    msg = `<b>${read.toLocaleString()} tokens read from cache</b> — billed at about a tenth
+           of the normal input rate, saving <b>${money(g.cache_savings_usd)}</b> on this request.`;
+  } else if (state === "uncached") {
+    msg = `<b>Nothing to cache.</b> The shared prefix is ${prefix.toLocaleString()} tokens,
+           below <b>${esc(g.chosen_model)}</b>'s minimum. Minimums are not uniform — 512 on
+           claude-opus-5, 1,024 on most models, 4,096 on claude-haiku-4-5. Paste a few
+           paragraphs into <i>Shared context</i> and re-send on the same session.`;
+  } else if (state === "cold_write") {
+    msg = `<b>Building the cache.</b> First request on this prefix, so there was nothing to
+           read yet — that is expected, not a miss. Send the same thing again on session
+           <b>${esc(g.session_id || "—")}</b> and this should become a warm read.`;
+  } else if (state === "warm_read") {
+    cls = "verdict warn";
+    msg = `<b>Expected a cache hit and got none.</b> The router priced this request assuming
+           a warm read on <b>${esc(g.chosen_model)}</b> and the vendor returned 0 cached
+           tokens. Either something invalidated the prefix, or this model does not deliver
+           prefix caching — the gateway tracks that and will stop discounting it after a few
+           more observations. See <code>/admin/cache/effectiveness</code>.`;
+  } else {
+    msg = `Cache state: ${esc(g.cache_state || "unknown")}.`;
+  }
+  el.className = cls;
+  el.style.marginTop = "10px";
+  el.innerHTML = cls === "hint" ? msg : `<span class="vi">${read>0?"✓":"!"}</span><div>${msg}</div>`;
+}
 
 /* ---- system alerts --------------------------------------------------
    The gateway telling us it cannot serve anything. Two audiences, two
