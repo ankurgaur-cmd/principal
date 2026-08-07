@@ -85,7 +85,7 @@ class StubProvider:
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stub")
     monkeypatch.setenv("OPENAI_API_KEY", "stub")
-    monkeypatch.setenv("GATEWAY_RECORD_PATH", str(tmp_path / "records.jsonl"))
+    monkeypatch.setenv("GATEWAY_RECORD_PATH", str(tmp_path / "records.db"))
     monkeypatch.setenv("GATEWAY_LLM_CLASSIFIER_ENABLED", "false")
 
     from aigateway.config import get_settings
@@ -106,7 +106,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setitem(
         __import__("aigateway.providers.registry", fromlist=["BUILDERS"]).BUILDERS,
         "anthropic",
-        lambda key: stub,
+        lambda key, kind="api_key": stub,
     )
 
     app = create_app()
@@ -809,3 +809,314 @@ def test_console_exposes_all_four_tabs(client):
     for tab in ("route", "agents", "fleet", "models"):
         assert f'data-tab="{tab}"' in page
     assert "Fan-in" in page and "Fan-out" in page
+
+
+# -- analytics over the record database --------------------------------------
+def test_analytics_reflects_served_traffic(client):
+    """The durable analytics view must agree with what was just served."""
+    assert _chat(client, "Classify the sentiment of this ticket.").status_code == 200
+    assert _chat(client, "Classify this one too.").status_code == 200
+
+    res = client.get("/admin/analytics?hours=1")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["overview"]["requests"] == 2
+    assert data["overview"]["spend_usd"] > 0
+    assert data["by_model"], "served traffic must appear in the per-model rollup"
+    assert data["by_model"][0]["requests"] >= 1
+    assert data["timeseries"], "hourly buckets must cover the traffic just sent"
+
+
+def test_analytics_dashboard_page_is_served(client):
+    page = client.get("/analytics")
+    assert page.status_code == 200
+    assert "Gateway analytics" in page.text
+    # Same rule as the console: self-contained, no CDN.
+    assert "http://" not in page.text.replace("http://www.w3.org", "")
+
+
+# -- streaming parity ---------------------------------------------------------
+def _stream_chat(client, prompt, session="stream-1", **ext):
+    messages = [
+        {"role": "system", "content": BIG_CONTEXT},
+        {"role": "user", "content": prompt},
+    ]
+    body = {
+        "model": "auto",
+        "messages": messages,
+        "max_tokens": 512,
+        "stream": True,
+        "x_gateway": {"session_id": session, **ext},
+    }
+    res = client.post(
+        "/v1/chat/completions",
+        json=body,
+        headers={"x-tenant-id": "t-e2e", "x-agent-id": "pytest"},
+    )
+    assert res.status_code == 200, res.text
+    frames = [
+        json.loads(line[6:])
+        for line in res.text.split("\n")
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+    ]
+    assert res.text.rstrip().endswith("data: [DONE]"), "stream must close properly"
+    return frames
+
+
+def test_streaming_announces_its_routing_in_the_first_chunk(client):
+    frames = _stream_chat(client, "Review this diff for bugs.")
+    meta = frames[0]["x_gateway"]
+    assert meta["chosen_model"]
+    assert meta["resolved_intent"]
+    assert meta["pilot_role"], "streaming must go through the cache pilot too"
+    assert meta["trace_id"]
+
+
+def test_streaming_requests_are_recorded_and_billed(client):
+    """The old streaming path was invisible: no record, and no ledger write
+    when usage never arrived. Both are load-bearing."""
+    _stream_chat(client, "Review this diff for race conditions.", session="stream-bill")
+
+    data = client.get("/admin/analytics?hours=1").json()
+    assert data["overview"]["requests"] == 1
+    assert data["overview"]["spend_usd"] > 0, "served tokens must reach the ledger"
+
+    spend = client.get(
+        "/admin/usage/t-e2e", headers={"x-tenant-id": "t-e2e"}
+    ).json()
+    assert spend["spend_usd_today"] > 0
+
+
+def test_streaming_keeps_the_session_sticky_for_unary_followups(client):
+    """One pipeline: a streamed turn must warm the same session state the
+    unary path reads."""
+    frames = _stream_chat(client, "Review this diff.", session="stream-warm")
+    streamed_model = frames[0]["x_gateway"]["chosen_model"]
+
+    follow = _chat(client, "Now check error handling.", session="stream-warm").json()
+    assert follow["x_gateway"]["chosen_model"] == streamed_model
+
+
+# -- live fan-out / fan-in ----------------------------------------------------
+def _live_events(client, path, body):
+    res = client.post(path, json=body, headers={"x-tenant-id": "t-e2e"})
+    assert res.status_code == 200, res.text
+    events = [
+        json.loads(line[6:])
+        for line in res.text.split("\n")
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+    ]
+    assert res.text.rstrip().endswith("data: [DONE]")
+    return events
+
+
+def test_fanout_live_streams_every_workers_stages(client):
+    events = _live_events(client, "/demo/fanout/live", {
+        "prompt": "Review this.", "shared_context": BIG_CONTEXT,
+        "agents": 3, "session_id": "live-fo", "max_tokens": 512,
+    })
+    stages = [e for e in events if e["event"] == "stage"]
+    workers = {e["worker"] for e in stages}
+    assert workers == {1, 2, 3}, "every worker's pipeline must be visible"
+    for w in workers:
+        seen = [e["stage"] for e in stages if e["worker"] == w]
+        assert "routed" in seen and "served" in seen, f"worker {w} lane is incomplete"
+    # The unified feed's clock: run-relative and non-decreasing per worker.
+    for w in workers:
+        ats = [e["at_ms"] for e in stages if e["worker"] == w]
+        assert ats == sorted(ats)
+
+    done = [e for e in events if e["event"] == "worker_done"]
+    assert len(done) == 3
+    summary = [e for e in events if e["event"] == "summary"]
+    assert len(summary) == 1
+    assert len(summary[0]["agents"]) == 3
+    assert summary[0]["total_cost_usd"] > 0
+
+    # The gateway-vs-LLM split: each lane closes with a hops event carrying
+    # it, and the summary accumulates it — the number that recurs on every
+    # agent call, which is the whole case for keeping the gateway light.
+    hops = [e for e in stages if e["stage"] == "hops"]
+    assert len(hops) == 3
+    for h in hops:
+        assert "gateway_overhead_ms" in h and "upstream_ms" in h
+        assert "pilot_wait_ms" in h
+
+    split = summary[0]["time_split"]
+    assert split["calls"] == 3
+    assert split["llm_ms_total"] > 0
+    assert split["gateway_ms_total"] >= 0
+    for agent in summary[0]["agents"]:
+        assert "gateway_ms" in agent and "upstream_ms" in agent
+
+
+def test_fanin_live_streams_workers_then_synthesis(client):
+    events = _live_events(client, "/demo/fanin/live", {
+        "task": "Decide.", "subtasks": ["Classify the risk", "Summarize the cost"],
+        "shared_context": BIG_CONTEXT, "session_id": "live-fi", "max_tokens": 512,
+    })
+    stages = [e for e in events if e["event"] == "stage"]
+    assert {e["worker"] for e in stages} == {1, 2, "synth"}
+
+    # The synthesiser must not start until every worker has finished.
+    first_synth = next(i for i, e in enumerate(stages) if e["worker"] == "synth")
+    served = [i for i, e in enumerate(stages)
+              if e["worker"] != "synth" and e["stage"] == "served"]
+    assert len(served) == 2 and max(served) < first_synth
+
+    summary = [e for e in events if e["event"] == "summary"]
+    assert len(summary) == 1
+    assert summary[0]["synthesis"]["model"]
+    assert summary[0]["totals"]["workers"] == 2
+    # Cumulative gateway time covers every leg: both workers AND the synth.
+    assert summary[0]["totals"]["time_split"]["calls"] == 3
+    assert summary[0]["synthesis"]["upstream_ms"] >= 0
+
+
+# -- account / subscription credentials ---------------------------------------
+def test_a_subscription_token_is_detected_and_accepted(client):
+    """`claude setup-token` tokens carry the sk-ant-oat prefix; the gateway
+    should recognise the shape without the user knowing the taxonomy."""
+    client.stub.key_ok = True
+    res = client.post(
+        "/admin/credentials",
+        json={"provider": "anthropic", "api_key": "sk-ant-oat01-subscription-token-xyz"},
+    )
+    assert res.status_code == 200, res.text
+    d = res.json()
+    assert d["kind"] == "oauth_token"
+    assert "sk-ant-oat01-subscription-token-xyz" not in str(d)
+
+    status = client.get("/admin/credentials").json()
+    anthropic = next(p for p in status["providers"] if p["provider"] == "anthropic")
+    assert anthropic["kind"] == "oauth_token"
+    assert "oauth_token" in anthropic["accepts"]
+
+
+def test_openai_refuses_subscription_tokens_with_a_reason(client):
+    """A ChatGPT plan is not API access; failing clearly beats failing 401."""
+    res = client.post(
+        "/admin/credentials",
+        json={"provider": "openai", "api_key": "some-subscription-token",
+              "kind": "oauth_token"},
+    )
+    assert res.status_code == 422
+    msg = res.json()["error"]["message"]
+    assert "subscription" in msg and "platform.openai.com" in msg
+
+    openai = next(
+        p for p in client.get("/admin/credentials").json()["providers"]
+        if p["provider"] == "openai"
+    )
+    assert openai["accepts"] == ["api_key"]
+
+
+# -- live pricing -------------------------------------------------------------
+def test_price_refresh_applies_the_feed_and_reroutes(client, monkeypatch):
+    """The button's whole promise: pull, apply with provenance, and the
+    router selects on the new rates immediately."""
+    from aigateway.catalog import CATALOG, get_model
+    from aigateway.prices import PriceFeed
+
+    snapshot = dict(CATALOG)
+    try:
+        before = _chat(client, "Classify this ticket.", session="price-a").json()
+        cheap = get_model(before["x_gateway"]["chosen_model"])
+
+        fake_feed = {
+            cheap.vendor_model_id: {
+                "input_cost_per_token": cheap.price_in_per_mtok * 5 / 1e6,
+                "output_cost_per_token": cheap.price_out_per_mtok * 5 / 1e6,
+            }
+        }
+
+        async def fake_fetch(self):
+            return fake_feed
+
+        monkeypatch.setattr(PriceFeed, "fetch", fake_fetch)
+        res = client.post("/admin/prices/refresh")
+        assert res.status_code == 200, res.text
+        report = res.json()
+        assert [u["model"] for u in report["updated"]] == [cheap.key]
+
+        status = client.get("/admin/prices").json()
+        row = next(m for m in status["models"] if m["model"] == cheap.key)
+        assert row["price_in_per_mtok"] == pytest.approx(cheap.price_in_per_mtok * 5)
+        assert row["checked"]
+
+        after = _chat(client, "Classify this one too.", session="price-b").json()
+        assert after["x_gateway"]["chosen_model"] != cheap.key
+    finally:
+        CATALOG.clear()
+        CATALOG.update(snapshot)
+
+
+def test_unreachable_price_feed_fails_loudly_and_changes_nothing(client, monkeypatch):
+    from aigateway.catalog import CATALOG
+    from aigateway.prices import PriceFeed
+
+    before = {k: m.price_in_per_mtok for k, m in CATALOG.items()}
+
+    async def broken_fetch(self):
+        raise RuntimeError("feed unreachable")
+
+    monkeypatch.setattr(PriceFeed, "fetch", broken_fetch)
+    res = client.post("/admin/prices/refresh")
+    assert res.status_code == 502
+    assert "feed" in res.json()["error"]["message"]
+    assert {k: m.price_in_per_mtok for k, m in CATALOG.items()} == before
+
+
+# -- transaction log ----------------------------------------------------------
+def test_transaction_log_carries_the_full_decision_record(client):
+    _chat(client, "Review this diff for races.", session="txn-1")
+    _chat(client, "Classify this ticket.", session="txn-2")
+
+    res = client.get("/admin/transactions?hours=1")
+    assert res.status_code == 200
+    d = res.json()
+    assert len(d["rows"]) == 2
+    newest = d["rows"][0]
+    # The drill-down promise: not just what happened, but why.
+    assert newest["routing_reason"]
+    assert isinstance(newest["considered"], list) and newest["considered"]
+    assert newest["chosen_model"] and newest["outcome"] == "ok"
+    assert newest["actual_cost_usd"] > 0
+    assert d["facets"]["models"], "filter dropdowns need facet values"
+
+    only = client.get(
+        "/admin/transactions?hours=1&session=txn-1"
+    ).json()["rows"]
+    assert len(only) == 1 and only[0]["session_id"] == "txn-1"
+
+
+def test_transactions_page_is_served(client):
+    page = client.get("/transactions")
+    assert page.status_code == 200
+    assert "Transactions" in page.text
+    assert "http://" not in page.text.replace("http://www.w3.org", "")
+
+
+# -- database explorer --------------------------------------------------------
+def test_db_explorer_endpoint_and_page(client):
+    _chat(client, "Classify this.", session="db-1")
+
+    schema = client.get("/admin/db/schema").json()
+    assert schema["tables"]["records"]["rows"] == 1
+
+    q = client.post(
+        "/admin/db/query",
+        json={"sql": "SELECT chosen_model, actual_cost_usd FROM records"},
+    ).json()
+    assert q["row_count"] == 1
+    assert q["columns"] == ["chosen_model", "actual_cost_usd"]
+
+    refused = client.post(
+        "/admin/db/query", json={"sql": "DROP TABLE records"}
+    ).json()
+    assert "read-only" in refused["error"]
+
+    page = client.get("/db")
+    assert page.status_code == 200
+    assert "Database" in page.text
+    assert "http://" not in page.text.replace("http://www.w3.org", "")

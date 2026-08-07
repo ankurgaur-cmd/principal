@@ -106,6 +106,13 @@ class TraceContext:
             "upstream_ms": self.upstream_ms,
             # What the gateway itself cost you, as opposed to the models.
             "gateway_overhead_ms": max(0, self.total_ms - self.upstream_ms),
+            # Broken out of the overhead: time spent *choosing* to wait for a
+            # cache pilot. It is a trade made to save money, not gateway
+            # compute — judging the gateway's weight by a number that includes
+            # it would say "heavy" about the mechanism that pays for itself.
+            "pilot_wait_ms": sum(
+                h.latency_ms for h in self.hops if h.kind == "cache_wait"
+            ),
             "failed_hops": sum(1 for h in self.hops if h.status not in ("ok", "skipped")),
         }
 

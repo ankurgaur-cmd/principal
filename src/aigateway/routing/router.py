@@ -21,11 +21,12 @@ router you cannot tune.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 
-from ..cache.hints import CachePlan, plan_cache
-from ..catalog import Capability, ModelSpec, Tier, get_model
+from ..cache.hints import CachePlan, plan_cache, stable_prefix_fingerprint
+from ..catalog import CATALOG, Capability, ModelSpec, Tier, get_model
 from ..config import Settings
 from ..quality import effort_that_fits
 from ..tokens import estimate_request_tokens
@@ -88,6 +89,8 @@ class Router:
         switchboard=None,
         reputation=None,
         cache_effectiveness=None,
+        limiter=None,
+        outputs=None,
     ):
         """``providers`` is a live source of enabled provider names.
 
@@ -114,6 +117,13 @@ class Router:
         # since it picks the cheapest candidate, a model that fails to cache is
         # favoured by the very discount it does not earn.
         self._cache_effectiveness = cache_effectiveness
+        # Optional: upstream pool pressure as a routing input. Only consulted
+        # when pool_rpm_limits names a pool — see config for why the limits are
+        # operator knowledge rather than discovery.
+        self._limiter = limiter
+        # Optional: learned completion volume per intent, replacing the static
+        # effort table in the cost forecast once it has evidence.
+        self._outputs = outputs
 
     @property
     def _providers(self) -> set[str]:
@@ -126,18 +136,53 @@ class Router:
         return f"session:{session_id}:model"
 
     async def warm_model_for(self, session_id: str | None) -> ModelSpec | None:
-        if not session_id:
-            return None
-        key = await self._store.get(self._session_key(session_id))
-        return get_model(key) if key else None
+        model, _ = await self._warm_state(session_id)
+        return model
 
-    async def remember(self, session_id: str | None, model: ModelSpec) -> None:
+    async def _warm_state(
+        self, session_id: str | None
+    ) -> tuple[ModelSpec | None, str | None]:
+        """The session's warm model plus the stable-prefix fingerprint it was
+        warmed with (None for records written before fingerprints existed)."""
+        if not session_id:
+            return None, None
+        raw = await self._store.get(self._session_key(session_id))
+        if not raw:
+            return None, None
+        try:
+            data = json.loads(raw)
+            return get_model(data.get("model", "")), data.get("fp") or None
+        except (TypeError, json.JSONDecodeError):
+            return get_model(raw), None  # legacy plain-key value
+
+    def _warm_matches(self, canonical, warm: ModelSpec | None, warm_fp: str | None):
+        """Session warmth is only real if the prompt *head* hasn't changed.
+
+        The session key says "this model served this session recently". That is
+        necessary but not sufficient for a warm read: edit the system prompt or
+        the tool set and the provider's prefix match dies at position zero,
+        while the session key cheerfully persists. Pricing a warm read that
+        cannot happen makes the sticky model look cheaper than it is — on
+        exactly the requests where switching away would be free.
+        """
+        if warm is None:
+            return None
+        if warm_fp and stable_prefix_fingerprint(canonical, warm.key) != warm_fp:
+            return None
+        return warm
+
+    async def remember(
+        self, session_id: str | None, model: ModelSpec, canonical=None
+    ) -> None:
         if not session_id:
             return
+        fp = stable_prefix_fingerprint(canonical, model.key) if canonical is not None else ""
         # TTL tracks the prompt-cache window: once the provider cache expires,
         # stickiness is no longer buying anything.
         await self._store.set(
-            self._session_key(session_id), model.key, ttl=self._s.session_ttl_seconds
+            self._session_key(session_id),
+            json.dumps({"model": model.key, "fp": fp}),
+            ttl=self._s.session_ttl_seconds,
         )
 
     # -- scoring ------------------------------------------------------------
@@ -241,6 +286,11 @@ class Router:
         endpoint uses it so the routing logic can be inspected before any key
         is entered. The serving path must leave it True.
         """
+        if self._switchboard is not None:
+            # One store read per decision, so every worker routes against the
+            # same switches. An "off" only one process honours is not off.
+            await self._switchboard.refresh()
+
         prefix_tokens, volatile_tokens = estimate_request_tokens(canonical)
         total = prefix_tokens + volatile_tokens
         policy = policy_for(intent)
@@ -250,7 +300,15 @@ class Router:
         # disagrees with the request it describes — and it is the field the
         # reasoning-starvation message quotes back at you.
         effort = effort_that_fits(canonical.effort or policy.effort, canonical.max_tokens)
-        expected_output = min(canonical.max_tokens, _EXPECTED_OUTPUT.get(effort, 1500))
+        # Forecast the output from what this intent actually produces, once
+        # there is evidence; the static effort table is the cold-start prior.
+        learned_output = self._outputs.expected(intent) if self._outputs else None
+        expected_output = min(
+            canonical.max_tokens,
+            learned_output
+            if learned_output is not None
+            else _EXPECTED_OUTPUT.get(effort, 1500),
+        )
 
         # 1. Explicit pin bypasses the *scoring*, but not the operator.
         #
@@ -294,7 +352,8 @@ class Router:
             # inflated by a write premium already paid, and the effectiveness
             # learner never saw a single pinned request because it only counts
             # requests where a hit was expected.
-            pinned_warm = await self.warm_model_for(canonical.session_id)
+            pinned_warm, pinned_fp = await self._warm_state(canonical.session_id)
+            pinned_warm = self._warm_matches(canonical, pinned_warm, pinned_fp)
             is_warm = bool(
                 self._s.cache_aware_routing
                 and pinned_warm is not None
@@ -338,7 +397,21 @@ class Router:
             degraded = True
             reason_bits.append(f"DEGRADED to {cost_ceiling_tier.name.lower()} by budget")
 
-        warm = await self.warm_model_for(canonical.session_id)
+        warm, warm_fp = await self._warm_state(canonical.session_id)
+        warm = self._warm_matches(canonical, warm, warm_fp)
+
+        # Pool pressure, read once for the pools an operator has bounded.
+        # A saturated pool is a capacity fact, not a preference — its models
+        # are excluded the same way a tripped breaker's are. Between 80% and
+        # 100% the score is nudged instead, shedding load before the 429s.
+        pool_pressure: dict[str, int] = {}
+        if self._limiter is not None and self._s.pool_rpm_limits:
+            for pool in {
+                m.rate_limit_pool
+                for m in CATALOG.values()
+                if m.rate_limit_pool in self._s.pool_rpm_limits
+            }:
+                pool_pressure[pool] = await self._limiter.pool_pressure(pool)
 
         # Exploration is decided once for the whole request. Deciding it per
         # candidate would compare some models on adjusted cost and others on
@@ -352,8 +425,6 @@ class Router:
             reason_bits.append("exploring (quality penalties ignored this request)")
 
         # 4. Build the candidate set.
-        from ..catalog import CATALOG
-
         candidates: list[Candidate] = []
         rejected: list[str] = []
         excluded: list[dict] = []
@@ -383,6 +454,38 @@ class Router:
                     }
                 )
                 continue
+
+            pool_note = ""
+            pool_factor = 1.0
+            if limit := self._s.pool_rpm_limits.get(model.rate_limit_pool):
+                pressure = pool_pressure.get(model.rate_limit_pool, 0)
+                if require_available and pressure >= limit:
+                    reason = (
+                        f"pool '{model.rate_limit_pool}' saturated "
+                        f"({pressure}/{limit} rpm)"
+                    )
+                    rejected.append(f"{model.key}: {reason}")
+                    excluded.append(
+                        {
+                            "model": model.key,
+                            "provider": model.provider,
+                            "tier": model.tier.name.lower(),
+                            "required_tier": required.name.lower(),
+                            "reason": reason,
+                            "kind": "pool_saturated",
+                        }
+                    )
+                    continue
+                if pressure / limit > 0.8:
+                    # Up to +50% at the brink — enough to prefer an equivalent
+                    # model in a quiet pool, not enough to override a real
+                    # price gap when there is no alternative.
+                    pool_factor = 1.0 + (pressure / limit - 0.8) * 2.5
+                    pool_note = (
+                        f"pool at {pressure / limit:.0%} — score raised "
+                        f"{(pool_factor - 1) * 100:.0f}%"
+                    )
+
             is_warm = bool(
                 self._s.cache_aware_routing and warm is not None and warm.key == model.key
             )
@@ -390,12 +493,14 @@ class Router:
                 model, prefix_tokens, volatile_tokens, expected_output, is_warm,
                 intent=intent, apply_quality=not exploring,
             )
+            cost *= pool_factor
             candidates.append(
                 Candidate(
                     model=model,
                     cost_usd=cost,
                     cache_state=cache_state,
                     plan=plan,
+                    note=pool_note,
                     raw_cost_usd=raw,
                     quality_multiplier=qmult,
                     quality_samples=(
@@ -530,6 +635,13 @@ def _diagnose_empty(excluded: list[dict], required: Tier) -> tuple[str, str]:
         return (
             "no_credentials",
             "Add a key in the console, or set ANTHROPIC_API_KEY / OPENAI_API_KEY.",
+        )
+    if all(k == "pool_saturated" for k in kinds):
+        return (
+            "pool_saturated",
+            "Every capable model's rate-limit pool is at its configured ceiling. "
+            "Wait for the minute window to roll, or raise pool_rpm_limits if the "
+            "provider tier actually allows more.",
         )
     if all(k in ("unhealthy", "switched_off", "no_credentials") for k in kinds):
         return (

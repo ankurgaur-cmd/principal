@@ -11,18 +11,28 @@ log = logging.getLogger(__name__)
 
 
 BUILDERS = {
-    "anthropic": lambda key: _build_anthropic(key),
-    "openai": lambda key: _build_openai(key),
+    "anthropic": lambda key, kind="api_key": _build_anthropic(key, kind),
+    "openai": lambda key, kind="api_key": _build_openai(key, kind),
+}
+
+# Which credential shapes each vendor actually honours. OpenAI offers no
+# subscription-token path to the API — a ChatGPT plan is not API access —
+# and pretending otherwise here would fail with a 401 the user cannot fix.
+CREDENTIAL_KINDS = {
+    "anthropic": ("api_key", "oauth_token"),
+    "openai": ("api_key",),
 }
 
 
-def _build_anthropic(key: str):
+def _build_anthropic(key: str, kind: str = "api_key"):
     from .anthropic_provider import AnthropicProvider
 
+    if kind == "oauth_token":
+        return AnthropicProvider(auth_token=key)
     return AnthropicProvider(key)
 
 
-def _build_openai(key: str):
+def _build_openai(key: str, kind: str = "api_key"):
     from .openai_provider import OpenAIProvider
 
     return OpenAIProvider(key)
@@ -40,15 +50,20 @@ class ProviderRegistry:
         self._providers: dict[str, object] = {}
         self._masked: dict[str, str] = {}
         self._source: dict[str, str] = {}
+        self._kind: dict[str, str] = {}
 
-        for name, key in (
-            ("anthropic", settings.anthropic_api_key),
-            ("openai", settings.openai_api_key),
+        for name, key, kind in (
+            ("anthropic", settings.anthropic_api_key, "api_key"),
+            # A subscription OAuth token from the environment counts as a
+            # configured provider — only if no API key claims the slot first.
+            ("anthropic", getattr(settings, "anthropic_auth_token", None), "oauth_token"),
+            ("openai", settings.openai_api_key, "api_key"),
         ):
-            if key:
-                self._providers[name] = BUILDERS[name](key)
+            if key and name not in self._providers:
+                self._providers[name] = BUILDERS[name](key, kind)
                 self._masked[name] = mask(key)
                 self._source[name] = "env"
+                self._kind[name] = kind
 
         if not self._providers:
             log.warning(
@@ -73,9 +88,13 @@ class ProviderRegistry:
         self._providers[provider] = BUILDERS[provider](None)
         self._masked[provider] = "(ambient)"
         self._source[provider] = "ambient"
+        self._kinds()[provider] = "ambient"
         log.info("using ambient credentials for %s", provider)
 
-    def set_credentials(self, provider: str, api_key: str, source: str = "runtime") -> None:
+    def set_credentials(
+        self, provider: str, api_key: str, source: str = "runtime",
+        kind: str = "api_key",
+    ) -> None:
         """Hot-swap a provider's client.
 
         The key is held in memory on the client object and nowhere else — not
@@ -86,15 +105,32 @@ class ProviderRegistry:
             from ..errors import NoCapableModel
 
             raise NoCapableModel(f"unknown provider '{provider}'")
-        self._providers[provider] = BUILDERS[provider](api_key)
+        if kind not in CREDENTIAL_KINDS.get(provider, ("api_key",)):
+            from ..errors import NoCapableModel
+
+            raise NoCapableModel(
+                f"{provider} does not accept '{kind}' credentials — "
+                f"supported: {', '.join(CREDENTIAL_KINDS[provider])}"
+            )
+        self._providers[provider] = BUILDERS[provider](api_key, kind)
         self._masked[provider] = mask(api_key)
         self._source[provider] = source
-        log.info("credentials set for %s (%s)", provider, self._masked[provider])
+        self._kinds()[provider] = kind
+        log.info(
+            "credentials set for %s (%s, %s)", provider, self._masked[provider], kind
+        )
 
     def clear_credentials(self, provider: str) -> None:
         self._providers.pop(provider, None)
         self._masked.pop(provider, None)
         self._source.pop(provider, None)
+        self._kinds().pop(provider, None)
+
+    def _kinds(self) -> dict[str, str]:
+        # getattr-guarded because tests replace __init__ wholesale.
+        if not hasattr(self, "_kind"):
+            self._kind = {}
+        return self._kind
 
     def status(self) -> list[dict]:
         """Masked credential status. Never includes a key."""
@@ -104,6 +140,8 @@ class ProviderRegistry:
                 "configured": name in self._providers,
                 "masked_key": self._masked.get(name, ""),
                 "source": self._source.get(name, ""),
+                "kind": self._kinds().get(name, "api_key" if name in self._providers else ""),
+                "accepts": list(CREDENTIAL_KINDS.get(name, ("api_key",))),
                 "models": sorted(m.key for m in CATALOG.values() if m.provider == name),
             }
             for name in BUILDERS

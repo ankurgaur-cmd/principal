@@ -24,12 +24,14 @@ from .cache import CacheEffectiveness
 from .config import get_settings
 from .errors import GatewayError
 from .governance import BudgetGuard, CostLedger, RateLimiter
-from .observability import AlertCentre, FleetStats, LatencyBaselines, RecordSink
+from .observability import AlertCentre, FleetStats, LatencyBaselines, build_sink
 from .pipeline import GatewayPipeline
+from .prices import PriceFeed
 from .providers import ProviderRegistry
 from .providers.health import HealthMonitor
 from .providers.switchboard import Switchboard
 from .routing import IntentClassifier, Reputation, Router
+from .routing.outputs import OutputEstimator
 from .state import build_store
 
 log = logging.getLogger(__name__)
@@ -49,9 +51,16 @@ def create_app() -> FastAPI:
         # Probing needs a running loop, so it starts here rather than at
         # construction time.
         app_.state.health.start(settings.health_probe_interval_seconds)
+        # Prices first restore what an earlier feed pull established, then
+        # keep themselves current on a daily timer.
+        await app_.state.prices.restore()
+        app_.state.prices.start()
         yield
+        await app_.state.prices.stop()
         await app_.state.health.stop()
         await store.close()
+        if close := getattr(app_.state.sink, "close", None):
+            close()
 
     app = FastAPI(
         lifespan=lifespan,
@@ -71,7 +80,9 @@ def create_app() -> FastAPI:
     )
     # The registry is passed live, not snapshotted — credentials can be added
     # at runtime via the console, and routing must pick that up immediately.
-    switchboard = Switchboard()
+    # Backed by the store so every worker sees the same switches — an "off"
+    # that only one process honours is not off.
+    switchboard = Switchboard(store)
     # Checked by the router before it discounts anything for a cache.
     cache_effectiveness = CacheEffectiveness()
     reputation = Reputation(
@@ -80,10 +91,17 @@ def create_app() -> FastAPI:
         max_penalty=settings.quality_max_penalty,
         exploration_rate=settings.quality_exploration_rate,
     )
+    ledger = CostLedger(store)
+    budget = BudgetGuard(settings, store, ledger)
+    limiter = RateLimiter(settings, store)
+    # Learned completion volume per intent — written by the pipeline after
+    # every response, read by the router's cost forecast.
+    outputs = OutputEstimator()
     router_ = Router(
         settings, store, registry,
         health=health, switchboard=switchboard, reputation=reputation,
         cache_effectiveness=cache_effectiveness,
+        limiter=limiter, outputs=outputs,
     )
     classifier = IntentClassifier(
         store,
@@ -92,13 +110,10 @@ def create_app() -> FastAPI:
         model_key=settings.classifier_model,
         min_confidence=settings.classifier_min_confidence,
     )
-    ledger = CostLedger(store)
-    budget = BudgetGuard(settings, store, ledger)
-    limiter = RateLimiter(settings, store)
     fleet = FleetStats()
     baselines = LatencyBaselines()
     alerts = AlertCentre()
-    sink = RecordSink(settings.record_path, fleet=fleet)
+    sink = build_sink(settings.record_path, fleet=fleet)
 
     app.state.settings = settings
     app.state.store = store
@@ -116,12 +131,16 @@ def create_app() -> FastAPI:
     app.state.baselines = baselines
     app.state.alerts = alerts
     app.state.cache_effectiveness = cache_effectiveness
+    app.state.outputs = outputs
+    app.state.prices = PriceFeed(
+        store, settings.price_feed_url, settings.price_refresh_hours
+    )
     app.state.auth = Authenticator(settings)
     app.state.pipeline = GatewayPipeline(
         settings, store, registry, router_, classifier, budget, limiter, ledger, sink,
         health=health, reputation=reputation, baselines=baselines,
         switchboard=switchboard, alerts=alerts,
-        cache_effectiveness=cache_effectiveness,
+        cache_effectiveness=cache_effectiveness, outputs=outputs,
     )
 
     app.include_router(chat.router)
@@ -142,6 +161,34 @@ def create_app() -> FastAPI:
         """
         return FileResponse(
             static_dir / "index.html",
+            headers={"cache-control": "no-store, must-revalidate"},
+        )
+
+    @app.get("/analytics", include_in_schema=False)
+    async def analytics_page():
+        """Analytics dashboard over the durable record database.
+
+        Same conventions as the console: self-contained, no CDN, no-store.
+        """
+        return FileResponse(
+            static_dir / "analytics.html",
+            headers={"cache-control": "no-store, must-revalidate"},
+        )
+
+    @app.get("/transactions", include_in_schema=False)
+    async def transactions_page():
+        """Per-request drill-down over the record database. Same rules as the
+        other pages: self-contained, no CDN, no-store."""
+        return FileResponse(
+            static_dir / "transactions.html",
+            headers={"cache-control": "no-store, must-revalidate"},
+        )
+
+    @app.get("/db", include_in_schema=False)
+    async def db_page():
+        """Read-only SQL explorer over the record database."""
+        return FileResponse(
+            static_dir / "db.html",
             headers={"cache-control": "no-store, must-revalidate"},
         )
 

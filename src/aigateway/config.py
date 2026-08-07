@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(
         None, validation_alias=AliasChoices("ANTHROPIC_API_KEY", "GATEWAY_ANTHROPIC_API_KEY")
     )
+    # A subscription OAuth token (`claude setup-token` → sk-ant-oat…). Used
+    # only when no API key is set; the SDK sends it as a bearer token.
+    anthropic_auth_token: str | None = Field(
+        None,
+        validation_alias=AliasChoices(
+            "ANTHROPIC_AUTH_TOKEN", "GATEWAY_ANTHROPIC_AUTH_TOKEN"
+        ),
+    )
     openai_api_key: str | None = Field(
         None, validation_alias=AliasChoices("OPENAI_API_KEY", "GATEWAY_OPENAI_API_KEY")
     )
@@ -39,6 +47,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
 
     # -- routing --
+    # Defaults to the prompt-cache window (300s for the 5m TTL, 3600 for 1h)
+    # unless set explicitly. Stickiness that outlives the provider cache holds
+    # sessions on an expensive model for nothing; stickiness that expires first
+    # abandons a cache that is still warm. The two must move together.
     session_ttl_seconds: int = 300
     cache_aware_routing: bool = True
     escalate_only: bool = True
@@ -51,6 +63,21 @@ class Settings(BaseSettings):
     cache_pilot_wait_ms: int = 4000
     cache_ttl: Literal["5m", "1h"] = "5m"
     semantic_cache_enabled: bool = False
+
+    # -- upstream pools --
+    # Requests/minute the router should assume each upstream rate-limit pool
+    # can take, e.g. GATEWAY_POOL_RPM_LIMITS='{"openai-frontier": 300}'.
+    # Empty means "don't gate on pool pressure". The honest limits live on the
+    # provider side and are only visible to us as 429s, so these are operator
+    # knowledge, not discovery — set them from your actual account tier.
+    # A saturated pool is excluded from routing; one past 80% is penalised in
+    # the score, which sheds load *before* the 429s start.
+    pool_rpm_limits: dict[str, int] = {}
+
+    # Gateway-owned deadline per upstream attempt. The breaker stops repeat
+    # offenders; this bounds the single hung call the breaker cannot see until
+    # it returns. Timeouts count as failures and trigger the fallback chain.
+    upstream_timeout_seconds: float = 120.0
 
     # -- model pool health --
     # Active probe cadence. 0 disables probing; passive observation of real
@@ -126,15 +153,50 @@ class Settings(BaseSettings):
     budget_mode: Literal["soft", "hard"] = "soft"
     preflight_exact_threshold: float = 0.85
 
+    # -- pricing feed --
+    # Machine-readable source of current per-token rates. Vendors publish no
+    # pricing API, so this defaults to the community-maintained LiteLLM price
+    # table; point it at your own blessed JSON (same shape) for an enterprise
+    # deployment. Empty string disables refresh entirely.
+    price_feed_url: str = (
+        "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+        "model_prices_and_context_window.json"
+    )
+    # Daily by default — the cadence list prices actually change on. The
+    # console button forces one at any time. 0 disables the timer (the button
+    # still works).
+    price_refresh_hours: float = 24.0
+
     # -- observability --
-    record_path: str = "./var/records.jsonl"
+    # SQLite, deliberately: a single zero-dependency file that sqlite3, DuckDB
+    # (`sqlite_scan`), pandas, and any agent with a shell can open directly.
+    # Point at a *.jsonl path to fall back to the legacy append-only sink.
+    record_path: str = "./var/records.db"
     log_level: str = "INFO"
 
     def model_post_init(self, __context) -> None:  # noqa: D105
         # An empty string in .env should read as "unset", not as a blank key.
-        for field in ("anthropic_api_key", "openai_api_key", "redis_url"):
+        for field in (
+            "anthropic_api_key", "anthropic_auth_token", "openai_api_key", "redis_url"
+        ):
             if getattr(self, field) == "":
                 object.__setattr__(self, field, None)
+
+        # Couple stickiness to the cache window it exists to protect, unless
+        # the operator chose a value deliberately.
+        if "session_ttl_seconds" not in self.model_fields_set:
+            object.__setattr__(
+                self, "session_ttl_seconds", 3600 if self.cache_ttl == "1h" else 300
+            )
+
+        # A guessable JWT secret is indistinguishable from no auth at all, and
+        # "jwt" mode is the operator saying untrusted callers can reach this.
+        # Refusing to start is kinder than starting open.
+        if self.auth_mode == "jwt" and self.jwt_secret == "change-me":
+            raise ValueError(
+                "auth_mode=jwt requires a real GATEWAY_JWT_SECRET; "
+                "the default 'change-me' would let anyone mint tenants"
+            )
 
 
 @lru_cache

@@ -20,6 +20,7 @@ the traffic actually goes.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from ..catalog import CATALOG
@@ -28,16 +29,56 @@ log = logging.getLogger(__name__)
 
 
 class Switchboard:
-    """In-memory on/off state for models and providers.
+    """On/off state for models and providers, shared through the store.
 
-    Not persisted: a restart returns to "everything the credentials allow",
-    which is the safe default. If you need a disable to survive a restart, take
-    the credential away instead — that is a stronger statement than a toggle.
+    The queries stay synchronous over a local mirror — the router calls them
+    per candidate. The mirror is refreshed from the store once per routing
+    decision (``refresh``) and written through on every mutation (``save``),
+    so with Redis every worker sees the same switches. Without a store it
+    degrades to the old per-process behaviour, which is correct for the only
+    deployment shape that has no store: a single dev process.
+
+    With Redis this state also survives a restart. That is the point, not an
+    accident: "switched off" is an operator decision, and a decision that
+    silently un-makes itself when a pod restarts is exactly the 3am surprise
+    this class exists to prevent. ``reset`` is the deliberate way back on.
     """
 
-    def __init__(self) -> None:
+    _KEY = "switchboard:state"
+
+    def __init__(self, store=None) -> None:
+        self._store = store
         self._disabled_models: set[str] = set()
         self._disabled_providers: set[str] = set()
+
+    # -- store sync ----------------------------------------------------------
+    async def refresh(self) -> None:
+        """Adopt the shared state. No-op without a store."""
+        if self._store is None:
+            return
+        raw = await self._store.get(self._KEY)
+        if raw is None:
+            return  # nothing persisted yet; the local view stands
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return
+        self._disabled_models = set(data.get("models", []))
+        self._disabled_providers = set(data.get("providers", []))
+
+    async def save(self) -> None:
+        """Publish the local view. Call after every mutation."""
+        if self._store is None:
+            return
+        await self._store.set(
+            self._KEY,
+            json.dumps(
+                {
+                    "models": sorted(self._disabled_models),
+                    "providers": sorted(self._disabled_providers),
+                }
+            ),
+        )
 
     # -- queries -----------------------------------------------------------
     def is_enabled(self, model_key: str, provider: str) -> bool:

@@ -38,8 +38,11 @@ class RateLimiter:
     async def pool_pressure(self, pool: str) -> int:
         """Requests observed against an upstream pool in the current window.
 
-        Exposed for the router and for dashboards; not yet a hard gate, because
-        the honest limit lives on the provider side and we only see it via 429s.
+        The router reads this when ``pool_rpm_limits`` bounds the pool: at the
+        ceiling the pool's models leave the candidate set, and past 80% their
+        score is penalised so load sheds before the 429s start. The honest
+        limit still lives on the provider side — the configured ceiling is
+        operator knowledge of the account tier, not discovery.
         """
         bucket_key = f"pool:{pool}"
         import time

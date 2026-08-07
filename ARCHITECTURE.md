@@ -821,15 +821,54 @@ Named rather than hidden.
   constantly conflated.
 - **OpenAI model ids and prices are placeholders.** Verify before trusting the
   ledger for chargeback. Anthropic figures are current first-party rates.
-- **Streaming skips the fallback chain** and writes the ledger only when the
-  stream closes.
-- **`mark_warm` fires on completion, not first token.** The provider cache is
-  readable from the first token, so the streaming path is where this becomes
-  worth tightening — the obvious next optimisation.
-- **Upstream pool pressure is measured but not routed on.** Plumbing exists
-  (`RateLimiter.pool_pressure`); the router does not read it. Model *health* is
-  routed on — see D20 — but pool saturation is a separate, still-unused signal.
 - **Rate limiting is a fixed window** — see [§9](#9-concurrency-and-consistency).
 - **No idempotency keys.** Multi-agent retries will double-charge.
 - **Replay assumes output length is model-independent.** It is not; treat its
   savings as an upper bound.
+
+### D27 — The first design review's fixes
+
+A review of the running gateway found the gaps below; each is now closed, and
+each closure is a decision worth recording.
+
+- **One pipeline, two transports.** `_prepare` (steps 1-8) and settlement are
+  shared by the unary and streaming paths. The streaming copy had drifted:
+  it skipped the `model:pin` scope check, wrote no record, and lost the ledger
+  write on client disconnect (usage is now estimated from what was actually
+  sent, and marked as an estimate on the record). Streaming also gained the
+  fallback chain — but only *before the first chunk*; after a byte is sent the
+  model identity is committed.
+- **The pilot's clock now matches reality.** The lock is heartbeat-held while
+  the pilot is genuinely in flight (a dead pilot still loses the seat in
+  seconds), follower patience scales with the chosen model's observed p50, and
+  the streaming path marks the prefix warm on the *first token* — the earliest
+  moment the provider cache is truthfully readable. With the old flat 4s wait
+  against 18-58s calls, every follower timed out and paid the cold write; the
+  feature demonstrated well and did nothing in production shapes.
+- **Hard budgets reserve, then settle.** `check` used to read spend and
+  `record` wrote it after the response — K concurrent requests could all pass
+  on one snapshot. Hard mode now atomically reserves the estimate and settles
+  the delta against actuals (releasing on any failure in between). Soft mode
+  keeps the cheap read: its job is to degrade, and a transient overshoot only
+  accelerates a degradation that was already coming.
+- **Session warmth is prefix-validated.** The session key alone said "this
+  model served this session"; it now carries a fingerprint of the stable head
+  (model, tools, system). History growth keeps warmth — append-only prefixes
+  keep hitting — but an edited system prompt or tool set invalidates it, so
+  the router stops pricing warm reads that cannot happen.
+- **The switchboard is shared through the store.** Refreshing once per routing
+  decision and written through on mutation, so "off" binds every worker, and
+  (with Redis) survives restarts — an operator decision should not un-make
+  itself when a pod recycles. `reset` is the deliberate road back.
+- **Pool pressure is a routing input** when `pool_rpm_limits` bounds a pool:
+  exclusion at the ceiling, a score penalty past 80% so load sheds before the
+  429s. The limits are operator knowledge of the account tier, not discovery.
+- **The output forecast is learned per intent** (rolling median, abstains
+  below 8 samples), replacing the static per-effort table that priced
+  classification like prose and review like a haiku.
+- **Records live in SQLite** (`var/records.db`), with `/admin/analytics` and
+  the `/analytics` dashboard over it; cache savings are priced from each
+  model's actual read multiplier instead of a hardcoded 0.1x.
+- **Guard rails**: a gateway-owned per-attempt upstream deadline (timeouts
+  fall back like any failure), `session_ttl` defaults to the cache TTL it
+  protects, and `auth_mode=jwt` refuses to start with the default secret.

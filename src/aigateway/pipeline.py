@@ -16,14 +16,23 @@ Order matters and is deliberate:
 Steps 4 and 6 look redundant and are not: the budget needs a cost, the cost
 needs a model, and the model depends on the budget. Routing twice is free
 (it is arithmetic over a small catalog); guessing is not.
+
+Steps 1-8 are one shared phase (``_prepare``) and step 10 one shared epilogue
+(``_settle``), used identically by the unary and streaming paths. They were
+two hand-maintained copies once, and the copies drifted exactly as copies do:
+streaming skipped the pin-scope check (an authz hole), never wrote a record,
+and lost the ledger write when a client disconnected mid-stream. The transport
+is allowed to differ; what the gateway *means* by serving a request is not.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from .auth import Principal
@@ -67,6 +76,21 @@ from .schemas import (
 from .tokens import estimate_request_tokens, estimate_tokens
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class Prepared:
+    """Everything decided before a byte goes upstream — transport-independent."""
+
+    canonical: CanonicalRequest
+    intent: Any
+    decision: Any
+    verdict: Any
+    plan: Any
+    role: PilotRole
+    # Set once the reserved estimate has been settled against actuals, so a
+    # later failure does not refund money that was already reconciled.
+    settled: bool = False
 
 
 def canonicalise(request: ChatCompletionRequest) -> CanonicalRequest:
@@ -146,6 +170,7 @@ class GatewayPipeline:
         switchboard=None,
         alerts: AlertCentre | None = None,
         cache_effectiveness=None,
+        outputs=None,
     ):
         self._s = settings
         self._store = store
@@ -167,6 +192,9 @@ class GatewayPipeline:
         # than a probe, like the circuit breaker.
         self.alerts = alerts or AlertCentre()
         self._cache_effectiveness = cache_effectiveness
+        # Learned completion volume per intent; fed here, consumed by the
+        # router's cost forecast.
+        self._outputs = outputs
         self.pilot = CachePilot(
             store, enabled=settings.cache_pilot_enabled, wait_ms=settings.cache_pilot_wait_ms
         )
@@ -213,7 +241,16 @@ class GatewayPipeline:
                 emit,
                 trace if self._s.hop_trace_enabled else None,
             )
-        except NoModelsAvailable as exc:
+        except Exception as exc:
+            self._note_failure(record, exc)
+            raise
+        finally:
+            record.latency_total_ms = int((time.perf_counter() - started) * 1000)
+            self._sink.write(record)
+
+    def _note_failure(self, record: RequestRecord, exc: Exception) -> None:
+        """Classify a failure onto the record — one mapping for both transports."""
+        if isinstance(exc, NoModelsAvailable):
             record.outcome = "no_models_available"
             record.error = str(exc.detail)
             self.alerts.raise_alert(
@@ -223,12 +260,10 @@ class GatewayPipeline:
                     remedy=exc.remedy,
                 )
             )
-            raise
-        except ProviderRefusal as exc:
+        elif isinstance(exc, ProviderRefusal):
             record.outcome = "refusal"
             record.error = str(exc.detail)
-            raise
-        except GatewayError as exc:
+        elif isinstance(exc, GatewayError):
             record.outcome = (
                 "budget_exceeded"
                 if exc.status_code == 402
@@ -237,14 +272,9 @@ class GatewayPipeline:
                 else "error"
             )
             record.error = str(exc.detail)
-            raise
-        except Exception as exc:
+        else:
             record.outcome = "error"
             record.error = repr(exc)
-            raise
-        finally:
-            record.latency_total_ms = int((time.perf_counter() - started) * 1000)
-            self._sink.write(record)
 
     async def _run(
         self,
@@ -311,6 +341,65 @@ class GatewayPipeline:
             nonlocal last_stage_at
             last_stage_at = time.perf_counter()
 
+        prepared = await self._prepare(request, principal, record, stage, trace)
+        canonical = prepared.canonical
+        decision = prepared.decision
+        verdict = prepared.verdict
+        plan = prepared.plan
+        role = prepared.role
+
+        # 9. invoke, with same-vendor-first fallback. The pilot lock stays
+        # heartbeat-alive for exactly as long as the call is in flight.
+        try:
+            async with self.pilot.holding(plan.fingerprint, role):
+                response, model_used, chain = await self._invoke_with_fallback(
+                    canonical, decision.model, decision.effort, plan, record, trace
+                )
+        except Exception:
+            if role is PilotRole.PILOT:
+                await self.pilot.release_failed(plan.fingerprint)
+            # The money reserved for this request never became spend.
+            await self._budget.release(principal.tenant_id, verdict)
+            raise
+        restart_stage_clock()
+
+        try:
+            if role is PilotRole.PILOT and plan.cacheable:
+                await self.pilot.mark_warm(plan.fingerprint, self._s.session_ttl_seconds)
+
+            await self._router.remember(canonical.session_id, model_used, canonical)
+            await self._limiter.note_upstream(model_used.rate_limit_pool)
+
+            # 10. price from actual usage, settling any hard-mode reservation.
+            priced = price_usage(response.usage, model_used, self._s.cache_ttl)
+            await self._ledger.record(
+                principal.tenant_id, principal.agent_id, model_used.key, priced,
+                reserved_usd=verdict.reserved_usd,
+            )
+            prepared.settled = True
+        except Exception:
+            if not prepared.settled:
+                await self._budget.release(principal.tenant_id, verdict)
+            raise
+
+        return await self._finish(
+            prepared, response, model_used, chain, priced, record, started,
+            stage, trace,
+        )
+
+    async def _prepare(
+        self,
+        request: ChatCompletionRequest,
+        principal: Principal,
+        record: RequestRecord,
+        stage,
+        trace: TraceContext | None = None,
+    ) -> Prepared:
+        """Steps 1-8: everything decided before a byte goes upstream.
+
+        Shared verbatim by the unary and streaming paths — the transport is
+        allowed to differ, the meaning of accepting a request is not.
+        """
         # 1. inbound rate limit
         await self._limiter.check_tenant(principal.tenant_id)
         await stage("accepted", {"tenant": principal.tenant_id, "agent": principal.agent_id})
@@ -389,131 +478,154 @@ class GatewayPipeline:
                 "message": verdict.message,
             },
         )
-        if verdict.tier_ceiling is not None:
-            # 6. re-route under the ceiling
-            decision = await self._router.route(
-                canonical, intent.intent, cost_ceiling_tier=verdict.tier_ceiling
-            )
-            log.info("tenant %s degraded: %s", principal.tenant_id, verdict.message)
-
-        record.chosen_model = decision.model.key
-        record.provider = decision.model.provider
-        record.tier = decision.tier.name.lower()
-        record.effort = decision.effort
-        record.routing_reason = decision.reason
-        record.degraded = decision.degraded
-        record.estimated_cost_usd = decision.estimated_cost_usd
-        record.considered = [
-            {"model": c.model.key, "cost_usd": round(c.cost_usd, 6), "cache": c.cache_state}
-            for c in decision.considered
-        ]
-
-        await stage(
-            "routed",
-            {
-                "model": decision.model.key,
-                "provider": decision.model.provider,
-                "tier": decision.tier.name.lower(),
-                "effort": decision.effort,
-                # Warn before the call, not after. Below the lowest reasoning
-                # floor there is no effort left to step down to, so the request
-                # will most likely burn its whole allowance thinking and return
-                # nothing — and the caller pays for it either way.
-                "budget_warning": (
-                    f"max_tokens={canonical.max_tokens} is below the "
-                    f"{REASONING_FLOOR_BY_EFFORT['low']} tokens a reasoning model "
-                    f"typically needs before any visible answer appears on work "
-                    f"this demanding. Expect an empty reply; raise max_tokens."
-                    if budget_starves_the_answer(canonical.max_tokens)
-                    and decision.tier is not Tier.LIGHT
-                    else None
-                ),
-                "reason": decision.reason,
-                # The plain-language account of the same decision. The console
-                # leads with this; `reason` is kept for logs and debugging.
-                "explain": explain(decision, intent.confidence, intent.source),
-                "degraded": decision.degraded,
-                "estimated_cost_usd": round(decision.estimated_cost_usd, 6),
-                "considered": [
-                    {
-                        "model": c.model.key,
-                        "provider": c.model.provider,
-                        "tier": c.model.tier.name.lower(),
-                        "estimated_cost_usd": round(c.cost_usd, 6),
-                        "cache_state": c.cache_state,
-                        "raw_cost_usd": round(c.raw_cost_usd, 6),
-                        "quality_multiplier": round(c.quality_multiplier, 3),
-                        "quality_samples": c.quality_samples,
-                        "quality_success_rate": c.quality_success_rate,
-                        "chosen": c.model.key == decision.model.key,
-                    }
-                    for c in sorted(decision.considered, key=lambda c: c.cost_usd)
-                ],
-            },
-        )
-
-        # 7. full cache plan for the model we actually picked
-        plan = plan_cache(canonical, decision.model, ttl=self._s.cache_ttl)
-        record.cache_state = decision.cache_state
-        record.cache_plan = plan.reason
-
-        # 8. cache pilot — the fan-out fix
-        # Only engage the pilot when there is a cache to protect. Serialising
-        # requests whose prefix is too short to cache makes followers wait out
-        # the full pilot timeout for an entry that can never exist — pure added
-        # latency for zero saving, which is worse than not having the pilot.
-        pilot_started = time.perf_counter()
-        if plan.cacheable:
-            role = await self.pilot.acquire(plan.fingerprint, self._s.session_ttl_seconds)
-        else:
-            role = PilotRole.DISABLED
-        record.pilot_role = role.value
-        if trace is not None and role in (PilotRole.FOLLOWER, PilotRole.TIMEOUT):
-            # Only record a hop when the pilot actually made us wait — a hop
-            # that always fires with 0ms is noise in the waterfall.
-            trace.add(
-                kind="cache_wait",
-                label="waited for cache pilot",
-                latency_ms=int((time.perf_counter() - pilot_started) * 1000),
-                status="ok" if role is PilotRole.FOLLOWER else "timeout",
-                detail=(
-                    "another request was warming this prefix; waited so this one "
-                    "could read the cache instead of writing it again"
-                ),
-            )
-        await stage(
-            "cache",
-            {
-                "state": decision.cache_state,
-                "plan": plan.reason,
-                "breakpoints": plan.breakpoints,
-                "pilot_role": role.value,
-                "fingerprint": plan.fingerprint[:12],
-            },
-        )
-
-        # 9. invoke, with same-vendor-first fallback
+        # Anything that fails between the reservation above and the pricing of
+        # a real response must hand the reserved money back — otherwise a
+        # rejected or crashed request spends budget it never used.
         try:
-            response, model_used, chain = await self._invoke_with_fallback(
-                canonical, decision.model, decision.effort, plan, record, trace
+            if verdict.tier_ceiling is not None:
+                # 6. re-route under the ceiling
+                decision = await self._router.route(
+                    canonical, intent.intent, cost_ceiling_tier=verdict.tier_ceiling
+                )
+                log.info("tenant %s degraded: %s", principal.tenant_id, verdict.message)
+
+            record.chosen_model = decision.model.key
+            record.provider = decision.model.provider
+            record.tier = decision.tier.name.lower()
+            record.effort = decision.effort
+            record.routing_reason = decision.reason
+            record.degraded = decision.degraded
+            record.estimated_cost_usd = decision.estimated_cost_usd
+            record.considered = [
+                {"model": c.model.key, "cost_usd": round(c.cost_usd, 6), "cache": c.cache_state}
+                for c in decision.considered
+            ]
+
+            await stage(
+                "routed",
+                {
+                    "model": decision.model.key,
+                    "provider": decision.model.provider,
+                    "tier": decision.tier.name.lower(),
+                    "effort": decision.effort,
+                    # Warn before the call, not after. Below the lowest reasoning
+                    # floor there is no effort left to step down to, so the request
+                    # will most likely burn its whole allowance thinking and return
+                    # nothing — and the caller pays for it either way.
+                    "budget_warning": (
+                        f"max_tokens={canonical.max_tokens} is below the "
+                        f"{REASONING_FLOOR_BY_EFFORT['low']} tokens a reasoning model "
+                        f"typically needs before any visible answer appears on work "
+                        f"this demanding. Expect an empty reply; raise max_tokens."
+                        if budget_starves_the_answer(canonical.max_tokens)
+                        and decision.tier is not Tier.LIGHT
+                        else None
+                    ),
+                    "reason": decision.reason,
+                    # The plain-language account of the same decision. The console
+                    # leads with this; `reason` is kept for logs and debugging.
+                    "explain": explain(decision, intent.confidence, intent.source),
+                    "degraded": decision.degraded,
+                    "estimated_cost_usd": round(decision.estimated_cost_usd, 6),
+                    "considered": [
+                        {
+                            "model": c.model.key,
+                            "provider": c.model.provider,
+                            "tier": c.model.tier.name.lower(),
+                            "estimated_cost_usd": round(c.cost_usd, 6),
+                            "cache_state": c.cache_state,
+                            "raw_cost_usd": round(c.raw_cost_usd, 6),
+                            "quality_multiplier": round(c.quality_multiplier, 3),
+                            "quality_samples": c.quality_samples,
+                            "quality_success_rate": c.quality_success_rate,
+                            "chosen": c.model.key == decision.model.key,
+                        }
+                        for c in sorted(decision.considered, key=lambda c: c.cost_usd)
+                    ],
+                },
+            )
+
+            # 7. full cache plan for the model we actually picked
+            plan = plan_cache(canonical, decision.model, ttl=self._s.cache_ttl)
+            record.cache_state = decision.cache_state
+            record.cache_plan = plan.reason
+
+            # 8. cache pilot — the fan-out fix
+            # Only engage the pilot when there is a cache to protect. Serialising
+            # requests whose prefix is too short to cache makes followers wait out
+            # the full pilot timeout for an entry that can never exist — pure added
+            # latency for zero saving, which is worse than not having the pilot.
+            pilot_started = time.perf_counter()
+            if plan.cacheable:
+                # Follower patience scaled to the pilot's observed latency: a
+                # flat wait shorter than the pilot's time-to-warm times every
+                # follower out, and they all pay the cold write anyway — which
+                # is the fan-out bug this module exists to fix.
+                wait_ms = None
+                if self._health and (p50 := self._health.p50_of(decision.model.key)):
+                    wait_ms = max(
+                        self._s.cache_pilot_wait_ms, min(int(p50 * 1.5), 60_000)
+                    )
+                role = await self.pilot.acquire(
+                    plan.fingerprint, self._s.session_ttl_seconds, wait_ms=wait_ms
+                )
+            else:
+                role = PilotRole.DISABLED
+            record.pilot_role = role.value
+            if trace is not None and role in (PilotRole.FOLLOWER, PilotRole.TIMEOUT):
+                # Only record a hop when the pilot actually made us wait — a hop
+                # that always fires with 0ms is noise in the waterfall.
+                trace.add(
+                    kind="cache_wait",
+                    label="waited for cache pilot",
+                    latency_ms=int((time.perf_counter() - pilot_started) * 1000),
+                    status="ok" if role is PilotRole.FOLLOWER else "timeout",
+                    detail=(
+                        "another request was warming this prefix; waited so this one "
+                        "could read the cache instead of writing it again"
+                    ),
+                )
+            await stage(
+                "cache",
+                {
+                    "state": decision.cache_state,
+                    "plan": plan.reason,
+                    "breakpoints": plan.breakpoints,
+                    "pilot_role": role.value,
+                    "fingerprint": plan.fingerprint[:12],
+                },
             )
         except Exception:
-            if role is PilotRole.PILOT:
-                await self.pilot.release_failed(plan.fingerprint)
+            await self._budget.release(principal.tenant_id, verdict)
             raise
-        restart_stage_clock()
 
-        if role is PilotRole.PILOT and plan.cacheable:
-            await self.pilot.mark_warm(plan.fingerprint, self._s.session_ttl_seconds)
-
-        await self._router.remember(canonical.session_id, model_used)
-        await self._limiter.note_upstream(model_used.rate_limit_pool)
-
-        # 10. price from actual usage
-        priced = price_usage(response.usage, model_used, self._s.cache_ttl)
-        await self._ledger.record(
-            principal.tenant_id, principal.agent_id, model_used.key, priced
+        return Prepared(
+            canonical=canonical,
+            intent=intent,
+            decision=decision,
+            verdict=verdict,
+            plan=plan,
+            role=role,
         )
+
+    async def _finish(
+        self,
+        prepared: Prepared,
+        response: ProviderResponse,
+        model_used: ModelSpec,
+        chain: list[str],
+        priced,
+        record: RequestRecord,
+        started: float,
+        stage,
+        trace: TraceContext | None = None,
+    ) -> ChatCompletionResponse:
+        """Steps 11+: quality, feedback loops, and the response envelope."""
+        canonical = prepared.canonical
+        intent = prepared.intent
+        decision = prepared.decision
+        plan = prepared.plan
+        role = prepared.role
 
         record.fallback_chain = chain
         record.chosen_model = model_used.key
@@ -542,9 +654,16 @@ class GatewayPipeline:
             last_user = next(
                 (m.content for m in reversed(canonical.messages) if m.role == "user"), ""
             )
-            report.judge = await judge(
-                self._registry, self._s.quality_judge_model, str(last_user), response.text
-            )
+            try:
+                report.judge = await judge(
+                    self._registry, self._s.quality_judge_model, str(last_user),
+                    response.text,
+                )
+            except Exception as exc:
+                # The grader is advisory. The response is already served and
+                # billed, so a judge outage must not turn success into failure.
+                log.warning("quality judge failed: %s", exc)
+                report.judge = None
             if report.judge and report.judge.get("adequate") is False:
                 report.checks.append(
                     Check(
@@ -573,6 +692,10 @@ class GatewayPipeline:
 
         if self._reputation:
             self._reputation.record(model_used.key, intent.intent, report.routing_ok)
+
+        # Teach the output forecast what this intent actually produced.
+        if self._outputs is not None:
+            self._outputs.record(intent.intent, response.usage.completion_tokens)
 
         if self._reputation and self._s.effort_tracking_enabled:
             # What this answer actually cost beyond one clean call. Everything
@@ -722,7 +845,13 @@ class GatewayPipeline:
                     attempt=attempt + 1,
                 )
             try:
-                response = await provider.invoke(canonical, spec.key, effort, attempt_plan)
+                # Gateway-owned deadline: the breaker stops repeat offenders,
+                # but only after they return. This bounds the single hung call
+                # the breaker cannot see, and turns it into a normal fallback.
+                response = await asyncio.wait_for(
+                    provider.invoke(canonical, spec.key, effort, attempt_plan),
+                    timeout=self._s.upstream_timeout_seconds,
+                )
                 elapsed = int((time.perf_counter() - call_started) * 1000)
                 if self._health:
                     self._health.record_success(spec.key, elapsed)
@@ -745,6 +874,20 @@ class GatewayPipeline:
                 # it on another model is both futile and a way to launder a
                 # refusal, so it propagates.
                 raise
+            except TimeoutError:
+                if hop is not None:
+                    hop.latency_ms = int((time.perf_counter() - call_started) * 1000)
+                    hop.status = "error"
+                    hop.detail = f"timeout after {self._s.upstream_timeout_seconds:.0f}s"
+                if self._health:
+                    self._health.record_failure(spec.key, "gateway deadline exceeded")
+                chain.append(f"{spec.key}(failed:timeout)")
+                last_error = UpstreamError(
+                    f"{spec.key} exceeded the {self._s.upstream_timeout_seconds:.0f}s "
+                    f"gateway deadline", 504,
+                )
+                log.warning("fallback: %s timed out", spec.key)
+                continue
             except (UpstreamError, GatewayError) as exc:
                 status = getattr(exc, "status_code", 500)
                 if hop is not None:
@@ -770,73 +913,322 @@ class GatewayPipeline:
     ) -> Any:
         """SSE passthrough in the OpenAI chunk format.
 
-        Routing, budget, and cache handling are identical; only the response
-        shape differs. Usage arrives in the final chunk, so the ledger is
-        written when the stream closes rather than up front.
-        """
-        await self._limiter.check_tenant(principal.tenant_id)
-        canonical = canonicalise(request)
-        prefix_tokens, volatile_tokens = estimate_request_tokens(canonical)
-        intent = await self._classifier.classify(canonical, prefix_tokens, volatile_tokens)
-        decision = await self._router.route(canonical, intent.intent)
-        verdict = await self._budget.check(principal.tenant_id, decision.estimated_cost_usd)
-        if verdict.tier_ceiling is not None:
-            decision = await self._router.route(
-                canonical, intent.intent, cost_ceiling_tier=verdict.tier_ceiling
-            )
+        Same ``_prepare`` phase as the unary path — pin scopes, budget
+        (including hard-mode reservation), the cache pilot, all of it — so
+        streaming cannot drift into a side door. Only the transport differs:
 
-        plan = plan_cache(canonical, decision.model, ttl=self._s.cache_ttl)
-        provider = self._registry.get(decision.model.provider)
+        * fallback happens *before the first chunk* — once a byte has been
+          sent the model identity is committed;
+        * the pilot marks the prefix warm on the **first chunk**, because the
+          provider cache is readable from first token — this is the earliest
+          truthful moment, and it is what lets followers stop waiting;
+        * settlement (ledger, record, feedback loops) runs when the stream
+          closes — including on client disconnect, where usage is estimated
+          from what was actually sent rather than silently unbilled.
+        """
+        started = time.perf_counter()
+        record = RequestRecord(
+            trace_id=uuid.uuid4().hex,
+            tenant=principal.tenant_id,
+            agent=principal.agent_id,
+            session_id=request.x_gateway.session_id,
+            declared_intent=request.x_gateway.intent,
+        )
+
+        async def no_stage(name: str, payload: dict) -> None:
+            return None  # SSE data chunks are the transport; no side-channel
+
+        try:
+            prepared = await self._prepare(request, principal, record, no_stage, None)
+        except Exception as exc:
+            self._note_failure(record, exc)
+            record.latency_total_ms = int((time.perf_counter() - started) * 1000)
+            self._sink.write(record)
+            raise
+
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
 
-        async def generate():
-            meta = {
-                "chosen_model": decision.model.key,
-                "resolved_intent": intent.intent,
-                "routing_reason": decision.reason,
-            }
-            opener = {
+        def chunk_for(model_key: str, delta: dict, finish: str | None) -> str:
+            payload = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": decision.model.key,
-                "choices": [
-                    {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
-                ],
-                # Routing transparency arrives in the first chunk so a streaming
-                # caller learns which model it got without waiting for the end.
-                "x_gateway": meta,
+                "model": model_key,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
             }
-            yield f"data: {json.dumps(opener)}\n\n"
+            return f"data: {json.dumps(payload)}\n\n"
 
+        async def generate():
+            canonical, decision, plan, role = (
+                prepared.canonical, prepared.decision, prepared.plan, prepared.role
+            )
             usage: Usage | None = None
-            async for chunk in provider.stream(
-                canonical, decision.model.key, decision.effort, plan
-            ):
-                if chunk.get("usage"):
-                    usage = chunk["usage"]
-                payload = {
+            text_parts: list[str] = []
+            model_used = decision.model
+            chain: list[str] = []
+            call_started: float | None = None
+            streamed = False       # at least one upstream chunk arrived
+            disconnected = False
+            failed: Exception | None = None
+            try:
+                try:
+                    async with self.pilot.holding(plan.fingerprint, role):
+                        agen, first, spec, used_plan, call_started = (
+                            await self._open_stream(canonical, decision, plan, chain)
+                        )
+                    if spec.key != model_used.key and role is PilotRole.PILOT:
+                        # The pilot's model fell over; its prefix will not be
+                        # warmed. Free the seat so a follower can take it.
+                        await self.pilot.release_failed(plan.fingerprint)
+                    model_used = spec
+                    streamed = True
+                    # First token = the provider cache is readable. Release the
+                    # followers now, not when the stream finishes minutes later.
+                    if used_plan.cacheable:
+                        await self.pilot.mark_warm(
+                            used_plan.fingerprint, self._s.session_ttl_seconds
+                        )
+                except Exception as exc:
+                    if role is PilotRole.PILOT:
+                        await self.pilot.release_failed(plan.fingerprint)
+                    failed = exc
+                    raise
+
+                opener = {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": decision.model.key,
+                    "model": model_used.key,
                     "choices": [
-                        {
-                            "index": 0,
-                            "delta": chunk.get("delta", {}),
-                            "finish_reason": chunk.get("finish_reason"),
-                        }
+                        {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
                     ],
+                    # Routing transparency arrives in the first chunk so a
+                    # streaming caller learns which model it got without
+                    # waiting for the end.
+                    "x_gateway": {
+                        "trace_id": record.trace_id,
+                        "chosen_model": model_used.key,
+                        "resolved_intent": prepared.intent.intent,
+                        "routing_reason": decision.reason,
+                        "cache_state": decision.cache_state,
+                        "pilot_role": role.value,
+                        "fallback_chain": chain,
+                    },
                 }
-                yield f"data: {json.dumps(payload)}\n\n"
+                yield f"data: {json.dumps(opener)}\n\n"
 
-            if usage:
-                priced = price_usage(usage, decision.model, self._s.cache_ttl)
-                await self._ledger.record(
-                    principal.tenant_id, principal.agent_id, decision.model.key, priced
+                async def relay(chunk: dict):
+                    nonlocal usage
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
+                    delta = chunk.get("delta", {})
+                    if isinstance(delta.get("content"), str):
+                        text_parts.append(delta["content"])
+                    return chunk_for(model_used.key, delta, chunk.get("finish_reason"))
+
+                if first is not None:
+                    yield await relay(first)
+                try:
+                    async for chunk in agen:
+                        yield await relay(chunk)
+                except (UpstreamError, GatewayError) as exc:
+                    # Mid-stream failure: the model identity is committed, so
+                    # there is nothing to fall back to. Close the stream
+                    # honestly rather than leaving it hanging.
+                    failed = exc
+                    log.warning("stream from %s died mid-flight: %s", model_used.key, exc)
+                    yield chunk_for(model_used.key, {}, "error")
+                yield "data: [DONE]\n\n"
+            except GeneratorExit:
+                disconnected = True
+                raise
+            finally:
+                settle = self._settle_stream(
+                    prepared, record, principal, model_used, chain, usage,
+                    "".join(text_parts), call_started, streamed, disconnected,
+                    failed, started,
                 )
-            await self._router.remember(canonical.session_id, decision.model)
-            yield "data: [DONE]\n\n"
+                if disconnected:
+                    # Awaiting inside GeneratorExit handling is not allowed;
+                    # the books still have to balance, so settle out-of-band.
+                    asyncio.get_running_loop().create_task(settle)
+                else:
+                    await settle
 
         return generate()
+
+    async def _open_stream(self, canonical, decision, plan, chain: list[str]):
+        """Start a provider stream, falling back until the first chunk arrives.
+
+        Fallback is only sound *before* any byte reaches the caller — after
+        that the response is committed to one model. So each candidate is held
+        to a first-chunk deadline, and failures roll to the next exactly like
+        the unary chain.
+        """
+        candidates = [decision.model] + self._registry.fallback_chain(
+            decision.model, switchboard=self._switchboard, health=self._health
+        )
+        last_error: Exception | None = None
+
+        for attempt, spec in enumerate(candidates):
+            try:
+                provider = self._registry.get(spec.provider)
+            except GatewayError as exc:
+                last_error = exc
+                continue
+
+            attempt_plan = plan if spec.key == decision.model.key else plan_cache(
+                canonical, spec, ttl=self._s.cache_ttl
+            )
+            agen = provider.stream(canonical, spec.key, decision.effort, attempt_plan)
+            call_started = time.perf_counter()
+            try:
+                first = await asyncio.wait_for(
+                    agen.__anext__(), timeout=self._s.upstream_timeout_seconds
+                )
+            except StopAsyncIteration:
+                first = None  # empty stream is still a served stream
+            except ProviderRefusal:
+                raise  # a content outcome, not an outage — never retried
+            except TimeoutError:
+                if self._health:
+                    self._health.record_failure(spec.key, "no first token in time")
+                chain.append(f"{spec.key}(failed:timeout)")
+                last_error = UpstreamError(
+                    f"{spec.key} sent no first token within "
+                    f"{self._s.upstream_timeout_seconds:.0f}s", 504,
+                )
+                continue
+            except (UpstreamError, GatewayError) as exc:
+                status = getattr(exc, "status_code", 500)
+                if status in (400, 403, 422):
+                    raise  # our request is wrong; another model will not fix it
+                if self._health:
+                    self._health.record_failure(spec.key, f"HTTP {status}")
+                chain.append(f"{spec.key}(failed:{status})")
+                last_error = exc
+                continue
+
+            if attempt:
+                chain.append(f"{spec.key}(recovered)")
+            return agen, first, spec, attempt_plan, call_started
+
+        raise last_error or UpstreamError("all providers failed", 503)
+
+    async def _settle_stream(
+        self,
+        prepared: Prepared,
+        record: RequestRecord,
+        principal: Principal,
+        model_used: ModelSpec,
+        chain: list[str],
+        usage: Usage | None,
+        text: str,
+        call_started: float | None,
+        streamed: bool,
+        disconnected: bool,
+        failed: Exception | None,
+        started: float,
+    ) -> None:
+        """Close the books on a stream, however it ended.
+
+        Ledger, health, record, and the feedback loops all run here — the
+        parts of serving a request that must not depend on whether the client
+        stayed for the whole answer.
+        """
+        try:
+            canonical = prepared.canonical
+            decision = prepared.decision
+
+            if failed is not None:
+                self._note_failure(record, failed)
+                if self._health and streamed and call_started is not None:
+                    self._health.record_failure(model_used.key, "died mid-stream")
+            elif disconnected:
+                record.outcome = "client_disconnected"
+
+            if streamed and failed is None and call_started is not None:
+                elapsed = int((time.perf_counter() - call_started) * 1000)
+                record.upstream_ms = elapsed
+                if self._health:
+                    self._health.record_success(model_used.key, elapsed)
+
+            if usage is None and streamed and failed is None:
+                # The stream ended before the usage chunk (disconnect, or a
+                # provider that never sends one). Estimate from what actually
+                # went over the wire — an approximate bill beats a silent zero,
+                # and the estimate is marked as such on the record.
+                prompt = record.prefix_tokens_est + record.volatile_tokens_est
+                usage = Usage(
+                    prompt_tokens=prompt,
+                    completion_tokens=estimate_tokens(text),
+                    total_tokens=prompt + estimate_tokens(text),
+                )
+                record.error = (record.error or "") + " [usage estimated]"
+
+            if usage is not None:
+                priced = price_usage(usage, model_used, self._s.cache_ttl)
+                await self._ledger.record(
+                    principal.tenant_id, principal.agent_id, model_used.key, priced,
+                    reserved_usd=prepared.verdict.reserved_usd,
+                )
+                prepared.settled = True
+                record.prompt_tokens = usage.prompt_tokens
+                record.completion_tokens = usage.completion_tokens
+                record.cache_read_tokens = usage.cache_read_tokens
+                record.cache_write_tokens = usage.cache_write_tokens
+                record.actual_cost_usd = priced.total_usd
+                record.cache_savings_usd = priced.cache_savings_usd
+            else:
+                # Nothing was served, nothing can be priced — the reservation
+                # goes back.
+                await self._budget.release(principal.tenant_id, prepared.verdict)
+                prepared.settled = True
+
+            if streamed:
+                await self._router.remember(canonical.session_id, model_used, canonical)
+                await self._limiter.note_upstream(model_used.rate_limit_pool)
+                self.alerts.clear("no_models_available")
+
+            if self._cache_effectiveness is not None and usage is not None and not disconnected:
+                self._cache_effectiveness.record(
+                    model_used.key,
+                    expected_hit=decision.cache_state == "warm_read",
+                    cached_tokens=usage.cache_read_tokens,
+                )
+
+            # Quality and the learning loops, on the reconstructed response.
+            # A disconnect says nothing about the model, so it teaches nothing.
+            if streamed and failed is None and not disconnected and usage is not None:
+                response = ProviderResponse(
+                    text=text,
+                    finish_reason="stop",
+                    model=model_used.key,
+                    usage=usage,
+                )
+                report = (
+                    assess(canonical, response, decision)
+                    if self._s.quality_checks_enabled
+                    else QualityReport()
+                )
+                record.quality_verdict = report.verdict
+                record.quality_failures = [c.id for c in report.failures]
+                record.routing_ok = report.routing_ok
+                if self._reputation:
+                    self._reputation.record(
+                        model_used.key, prepared.intent.intent, report.routing_ok
+                    )
+                if self._outputs is not None:
+                    self._outputs.record(
+                        prepared.intent.intent, usage.completion_tokens
+                    )
+
+            record.fallback_chain = chain
+            record.chosen_model = model_used.key
+            record.provider = model_used.provider
+        except Exception as exc:  # settling must never break the transport
+            log.warning("stream settlement failed: %s", exc)
+        finally:
+            record.latency_total_ms = int((time.perf_counter() - started) * 1000)
+            self._sink.write(record)

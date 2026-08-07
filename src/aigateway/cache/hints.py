@@ -67,6 +67,29 @@ def prefix_fingerprint(canonical, model_key: str) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:32]
 
 
+def stable_prefix_fingerprint(canonical, model_key: str) -> str:
+    """Identity of the *head* of the prompt: model, tools, system — not history.
+
+    This is the invariant a session's cache depends on across turns. History
+    grows append-only, so turn N's cached prefix stays a prefix of turn N+1's
+    prompt and keeps hitting; a changed system prompt or tool set breaks the
+    match at position zero and kills the whole entry. Routing uses this to ask
+    "is the session's warmth still real for *this* request" — comparing full
+    fingerprints would say no on every normal conversational turn, which is
+    exactly wrong.
+    """
+    parts = {
+        "model": model_key,
+        "tools": [
+            {"n": t.name, "d": t.description, "p": t.parameters}
+            for t in canonical.sorted_tools()
+        ],
+        "system": canonical.system,
+    }
+    blob = json.dumps(parts, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()[:32]
+
+
 def plan_cache(canonical, model: ModelSpec, ttl: str = "5m") -> CachePlan:
     prefix_tokens, volatile_tokens = estimate_request_tokens(canonical)
     plan = CachePlan(

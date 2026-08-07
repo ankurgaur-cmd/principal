@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moon — Analytics</title>
+<style>
+/* Tokens. Light is the base; dark overrides under both the OS preference and
+   the explicit toggle, so the toggle wins in both directions. */
+:root{
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e;
+  --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7;
+  --border:rgba(11,11,11,.10);
+  --s1:#2a78d6; --s2:#eb6834;            /* categorical slots 1–2 */
+  --div-pos:#2a78d6; --div-neg:#e34948;  /* diverging pair */
+  --good:#006300; --warn:#fab219; --crit:#d03b3b;
+  --seq-lo:#9ec5f4;                      /* sequential step 200 */
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --axis:#383835;
+    --border:rgba(255,255,255,.10);
+    --s1:#3987e5; --s2:#d95926;
+    --div-pos:#3987e5; --div-neg:#e66767;
+    --good:#0ca30c;
+    --seq-lo:#1c5cab;
+  }
+}
+:root[data-theme="dark"]{
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7;
+  --muted:#898781; --grid:#2c2c2a; --axis:#383835;
+  --border:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#d95926;
+  --div-pos:#3987e5; --div-neg:#e66767;
+  --good:#0ca30c;
+  --seq-lo:#1c5cab;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);
+  font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:var(--s1);text-decoration:none}
+header{padding:14px 20px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+h1{font-size:17px;margin:0;font-weight:650}
+h1 span{color:var(--muted);font-weight:450}
+.spacer{flex:1}
+.range{display:flex;gap:2px;background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;padding:2px}
+.range button{border:0;background:none;color:var(--ink2);padding:5px 11px;
+  border-radius:6px;cursor:pointer;font:inherit;font-size:13px}
+.range button:hover{background:var(--grid)}
+.range button.on{color:var(--ink);font-weight:650;background:var(--grid)}
+button.ghost{border:1px solid var(--border);background:var(--surface);color:var(--ink2);
+  border-radius:8px;padding:5px 11px;cursor:pointer;font:inherit;font-size:13px}
+.wrap{max-width:1220px;margin:0 auto;padding:18px 20px 40px}
+.note{color:var(--muted);font-size:12.5px;margin:6px 0 14px}
+/* KPI row */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px}
+.tile{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px}
+.tile .k{color:var(--ink2);font-size:12px}
+.tile .v{font-size:26px;font-weight:650;margin-top:2px}
+.tile .d{font-size:12px;color:var(--muted);margin-top:2px}
+.tile .d.good{color:var(--good)}
+.tile .d.bad{color:var(--crit)}
+/* Cards */
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+@media(max-width:880px){.row2{grid-template-columns:1fr}}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:14px 16px;min-width:0}
+.card h2{font-size:13.5px;margin:0 0 2px;font-weight:650}
+.card .sub{color:var(--muted);font-size:12px;margin:0 0 10px}
+.card svg{display:block;width:100%}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--ink2);margin:2px 0 8px}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+.empty{color:var(--muted);padding:26px 0;text-align:center;font-size:13px}
+/* Tables */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{color:var(--muted);font-weight:500;text-align:left;padding:4px 8px;
+  border-bottom:1px solid var(--grid);font-size:12px}
+td{padding:5px 8px;border-bottom:1px solid var(--grid)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:0}
+.scroll{overflow-x:auto}
+/* SVG marks */
+.gridline{stroke:var(--grid);stroke-width:1}
+.axisline{stroke:var(--axis);stroke-width:1}
+text.lbl{fill:var(--ink2);font-size:11.5px}
+text.val{fill:var(--ink);font-size:11.5px;font-variant-numeric:tabular-nums}
+text.tick{fill:var(--muted);font-size:10.5px}
+/* Tooltip */
+#tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--ink);
+  border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:12.5px;
+  box-shadow:0 4px 14px rgba(0,0,0,.18);display:none;z-index:10;max-width:280px}
+#tip b{display:block}
+#tip .m{color:var(--ink2)}
+code,pre{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;overflow-x:auto;color:var(--ink2)}
+pre b{color:var(--ink);font-weight:600}
+</style>
+</head>
+<body>
+<header>
+  <h1>Moon <span>— Gateway analytics</span></h1>
+  <span class="note" id="meta" style="margin:0"></span>
+  <div class="spacer"></div>
+  <div class="range" id="range">
+    <button data-h="1">1h</button>
+    <button data-h="24" class="on">24h</button>
+    <button data-h="168">7d</button>
+    <button data-h="720">30d</button>
+  </div>
+  <button class="ghost" id="themeBtn">◐ Theme</button>
+  <a href="/transactions" class="ghost" style="display:inline-block;padding:5px 11px">Transactions →</a>
+  <a href="/db" class="ghost" style="display:inline-block;padding:5px 11px">DB →</a>
+  <a href="/" class="ghost" style="display:inline-block;padding:5px 11px">Console →</a>
+</header>
+
+<div class="wrap">
+  <div class="kpis" id="kpis"></div>
+  <div class="note">Durable view over <code id="dbpath">var/records.db</code> — survives
+    restarts, unlike the console's rolling fleet window. Every number here is one SQL
+    query away for any tool that opens SQLite.</div>
+
+  <div class="row2">
+    <div class="card"><h2>Requests over time</h2>
+      <p class="sub">Per hour, all outcomes. Gaps are hours with no traffic.</p>
+      <div id="chReq"></div></div>
+    <div class="card"><h2>Spend over time</h2>
+      <p class="sub">Actual billed cost per hour (not the estimate).</p>
+      <div id="chSpend"></div></div>
+  </div>
+
+  <div class="row2">
+    <div class="card"><h2>Where the money goes</h2>
+      <p class="sub">Spend by model. The router selects on price — concentration here is
+        a routing decision, so it should be explainable.</p>
+      <div id="chModels"></div></div>
+    <div class="card"><h2>Cache economics by model</h2>
+      <div class="legend"><span><i style="background:var(--s1)"></i>read tokens</span>
+        <span><i style="background:var(--s2)"></i>write tokens</span></div>
+      <p class="sub">Reads at ~0.1× are the payoff; writes are the premium paid to get
+        there. Reads pinned at zero on a busy model = broken caching.</p>
+      <div id="chCache"></div></div>
+  </div>
+
+  <div class="row2">
+    <div class="card"><h2>Cost-estimate drift by model</h2>
+      <p class="sub">Signed mean of (estimate − actual) ÷ actual. Budget enforcement
+        trusts the estimate; drift here is enforcement quietly going wrong.</p>
+      <div id="chDrift"></div></div>
+    <div class="card"><h2>Cache pilot outcomes</h2>
+      <p class="sub"><b>warm</b>/<b>follower</b> are saves; <b>timeout</b> means the pilot
+        didn't land inside the wait — the fan-out fix not paying off.</p>
+      <div id="chPilot"></div></div>
+  </div>
+
+  <div class="row2">
+    <div class="card"><h2>Routing misses</h2>
+      <p class="sub">Quality checks failed on an OK response — evidence the (model,
+        intent) pairing is wrong, and what the reputation loop feeds on.</p>
+      <div class="scroll" id="tblMisses"></div></div>
+    <div class="card"><h2>By intent</h2>
+      <p class="sub">Avg completion tokens per intent is what the output-budget policy
+        should be sized against.</p>
+      <div class="scroll" id="tblIntents"></div></div>
+  </div>
+
+  <div class="card" style="margin-top:14px"><h2>Query it yourself</h2>
+    <p class="sub">The record database is plain SQLite — one table, <code>records</code>,
+      one row per request.</p>
+<pre><b>sqlite3</b> var/records.db "SELECT chosen_model, ROUND(SUM(actual_cost_usd),4) AS usd,
+  SUM(cache_read_tokens) AS cached FROM records GROUP BY 1 ORDER BY usd DESC"
+
+<b>duckdb</b> -c "SELECT resolved_intent, COUNT(*), AVG(latency_total_ms)
+  FROM sqlite_scan('var/records.db','records') GROUP BY 1"
+
+<b>python -m aigateway.replay.harness</b> var/records.db   # counterfactual routing costs</pre>
+  </div>
+</div>
+
+<div id="tip"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+/* ---------- theme ---------- */
+const savedTheme = localStorage.getItem("moon-theme");
+if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+$("themeBtn").onclick = () => {
+  const cur = document.documentElement.dataset.theme ||
+    (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem("moon-theme", next);
+  render();               // charts read palette tokens at draw time
+};
+
+/* ---------- formatting ---------- */
+const fmtUsd = v => v >= 100 ? "$" + v.toFixed(0) : v >= 1 ? "$" + v.toFixed(2)
+  : "$" + v.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+const fmtNum = v => v >= 1e6 ? (v/1e6).toFixed(1) + "M"
+  : v >= 1e4 ? Math.round(v/1e3) + "k" : v >= 1000 ? (v/1e3).toFixed(1) + "k"
+  : Number.isInteger(v) ? String(v) : v.toFixed(1);
+const fmtPct = v => (v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%";
+
+/* ---------- tooltip ---------- */
+const tip = $("tip");
+function showTip(evt, html){
+  tip.innerHTML = html; tip.style.display = "block";
+  const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = evt.clientX + pad, y = evt.clientY + pad;
+  if (x + w > innerWidth - 8) x = evt.clientX - w - pad;
+  if (y + h > innerHeight - 8) y = evt.clientY - h - pad;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+function hideTip(){ tip.style.display = "none"; }
+
+/* ---------- svg helpers ---------- */
+function svgEl(tag, attrs){
+  const n = document.createElementNS(NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+function chartSvg(host, height){
+  host.innerHTML = "";
+  const svg = svgEl("svg", {viewBox: `0 0 640 ${height}`, height});
+  host.appendChild(svg);
+  return svg;
+}
+function emptyState(host, msg){
+  host.innerHTML = `<div class="empty">${msg || "No traffic in this window."}</div>`;
+}
+
+/* ---------- line / area (single series, hourly) ---------- */
+function lineChart(host, series, {fmt = fmtNum, area = false} = {}){
+  if (!series.length || series.every(d => !d.v)) return emptyState(host);
+  const H = 190, PADL = 56, PADR = 12, PADT = 12, PADB = 26, W = 640;
+  const svg = chartSvg(host, H);
+  const max = Math.max(...series.map(d => d.v)) || 1;
+  const iw = W - PADL - PADR, ih = H - PADT - PADB;
+  const x = i => PADL + (series.length === 1 ? iw / 2 : i * iw / (series.length - 1));
+  const y = v => PADT + ih - (v / max) * ih;
+
+  for (let g = 0; g <= 3; g++){                      // recessive grid
+    const gy = PADT + ih - (g / 3) * ih;
+    svg.appendChild(svgEl("line", {x1: PADL, x2: W - PADR, y1: gy, y2: gy, class: "gridline"}));
+    const t = svgEl("text", {x: PADL - 6, y: gy + 3.5, "text-anchor": "end", class: "tick"});
+    t.textContent = fmt(max * g / 3); svg.appendChild(t);
+  }
+  svg.appendChild(svgEl("line",
+    {x1: PADL, x2: W - PADR, y1: PADT + ih, y2: PADT + ih, class: "axisline"}));
+
+  const pts = series.map((d, i) => `${x(i)},${y(d.v)}`).join(" ");
+  if (area){
+    const a = svgEl("polygon", {points:
+      `${PADL},${PADT + ih} ${pts} ${x(series.length - 1)},${PADT + ih}`,
+      fill: css("--s1"), opacity: .18});
+    svg.appendChild(a);
+  }
+  svg.appendChild(svgEl("polyline", {points: pts, fill: "none",
+    stroke: css("--s1"), "stroke-width": 2, "stroke-linejoin": "round"}));
+
+  // x ticks: first, middle, last
+  [0, Math.floor((series.length - 1) / 2), series.length - 1]
+    .filter((v, i, a) => a.indexOf(v) === i)
+    .forEach(i => {
+      const t = svgEl("text", {x: x(i), y: H - 8, "text-anchor":
+        i === 0 ? "start" : i === series.length - 1 ? "end" : "middle", class: "tick"});
+      t.textContent = series[i].label; svg.appendChild(t);
+    });
+
+  // crosshair + tooltip layer
+  const hover = svgEl("g", {}); svg.appendChild(hover);
+  const overlay = svgEl("rect", {x: PADL, y: PADT, width: iw, height: ih,
+    fill: "transparent"});
+  svg.appendChild(overlay);
+  overlay.addEventListener("mousemove", evt => {
+    const box = svg.getBoundingClientRect();
+    const px = (evt.clientX - box.left) * (W / box.width);
+    const i = Math.max(0, Math.min(series.length - 1,
+      Math.round((px - PADL) / (iw / Math.max(1, series.length - 1)))));
+    hover.innerHTML = "";
+    hover.appendChild(svgEl("line", {x1: x(i), x2: x(i), y1: PADT, y2: PADT + ih,
+      stroke: css("--axis"), "stroke-width": 1}));
+    const dot = svgEl("circle", {cx: x(i), cy: y(series[i].v), r: 4,
+      fill: css("--s1"), stroke: css("--surface"), "stroke-width": 2});
+    hover.appendChild(dot);
+    showTip(evt, `<b>${series[i].label}</b><span class="m">${fmt(series[i].v)}</span>`);
+  });
+  overlay.addEventListener("mouseleave", () => { hover.innerHTML = ""; hideTip(); });
+}
+
+/* ---------- horizontal bars (magnitude, one hue) ---------- */
+function barChart(host, rows, {fmt = fmtNum, color, tipHtml} = {}){
+  if (!rows.length || rows.every(r => !r.v)) return emptyState(host);
+  const BAR = 18, GAP = 10, PADT = 4, LBL = 150, W = 640, VAL = 62;
+  const H = PADT + rows.length * (BAR + GAP);
+  const svg = chartSvg(host, H);
+  const max = Math.max(...rows.map(r => r.v)) || 1;
+  const iw = W - LBL - VAL;
+  const fill = color || css("--s1");
+
+  rows.forEach((r, i) => {
+    const yy = PADT + i * (BAR + GAP);
+    const w = Math.max(2, (r.v / max) * iw);
+    const lbl = svgEl("text", {x: LBL - 8, y: yy + BAR / 2 + 4,
+      "text-anchor": "end", class: "lbl"});
+    lbl.textContent = r.label.length > 20 ? r.label.slice(0, 19) + "…" : r.label;
+    svg.appendChild(lbl);
+    // rounded at the data end only: square the baseline side with a clip
+    const bar = svgEl("path", {d:
+      `M${LBL},${yy} h${w - 4} a4,4 0 0 1 4,4 v${BAR - 8} a4,4 0 0 1 -4,4 h${-(w - 4)} z`,
+      fill});
+    svg.appendChild(bar);
+    const val = svgEl("text", {x: LBL + w + 7, y: yy + BAR / 2 + 4, class: "val"});
+    val.textContent = fmt(r.v); svg.appendChild(val);
+    const hit = svgEl("rect", {x: 0, y: yy - GAP / 2, width: W, height: BAR + GAP,
+      fill: "transparent"});
+    hit.addEventListener("mousemove", evt =>
+      showTip(evt, tipHtml ? tipHtml(r) : `<b>${r.label}</b><span class="m">${fmt(r.v)}</span>`));
+    hit.addEventListener("mouseleave", hideTip);
+    svg.appendChild(hit);
+  });
+  svg.appendChild(svgEl("line", {x1: LBL, x2: LBL, y1: 0, y2: H, class: "axisline"}));
+}
+
+/* ---------- stacked horizontal bars (2 series, 2px surface gap) ---------- */
+function stackChart(host, rows, {fmt = fmtNum} = {}){
+  if (!rows.length || rows.every(r => !r.a && !r.b)) return emptyState(host);
+  const BAR = 18, GAP = 10, PADT = 4, LBL = 150, W = 640, VAL = 66;
+  const H = PADT + rows.length * (BAR + GAP);
+  const svg = chartSvg(host, H);
+  const max = Math.max(...rows.map(r => r.a + r.b)) || 1;
+  const iw = W - LBL - VAL;
+  const c1 = css("--s1"), c2 = css("--s2");
+
+  rows.forEach((r, i) => {
+    const yy = PADT + i * (BAR + GAP);
+    const lbl = svgEl("text", {x: LBL - 8, y: yy + BAR / 2 + 4,
+      "text-anchor": "end", class: "lbl"});
+    lbl.textContent = r.label.length > 20 ? r.label.slice(0, 19) + "…" : r.label;
+    svg.appendChild(lbl);
+    const wa = (r.a / max) * iw, wb = (r.b / max) * iw;
+    if (wa > 0) svg.appendChild(svgEl("rect",
+      {x: LBL, y: yy, width: Math.max(2, wa), height: BAR, fill: c1}));
+    if (wb > 0) svg.appendChild(svgEl("rect",              // 2px surface gap
+      {x: LBL + wa + 2, y: yy, width: Math.max(2, wb), height: BAR, rx: 4, fill: c2}));
+    const val = svgEl("text", {x: LBL + wa + wb + 9, y: yy + BAR / 2 + 4, class: "val"});
+    val.textContent = fmt(r.a + r.b); svg.appendChild(val);
+    const hit = svgEl("rect", {x: 0, y: yy - GAP / 2, width: W, height: BAR + GAP,
+      fill: "transparent"});
+    hit.addEventListener("mousemove", evt => showTip(evt,
+      `<b>${r.label}</b><span class="m">read ${fmt(r.a)} · write ${fmt(r.b)}</span>` +
+      (r.note ? `<span class="m">${r.note}</span>` : "")));
+    hit.addEventListener("mouseleave", hideTip);
+    svg.appendChild(hit);
+  });
+  svg.appendChild(svgEl("line", {x1: LBL, x2: LBL, y1: 0, y2: H, class: "axisline"}));
+}
+
+/* ---------- diverging bars (polarity: over/under-estimate) ---------- */
+function divergingChart(host, rows){
+  if (!rows.length) return emptyState(host, "No priced requests in this window.");
+  const BAR = 18, GAP = 10, PADT = 4, LBL = 150, W = 640;
+  const H = PADT + rows.length * (BAR + GAP) + 16;
+  const svg = chartSvg(host, H);
+  const max = Math.max(.05, ...rows.map(r => Math.abs(r.v)));
+  const iw = W - LBL - 70, mid = LBL + iw / 2;
+  const pos = css("--div-pos"), neg = css("--div-neg");
+
+  svg.appendChild(svgEl("line", {x1: mid, x2: mid, y1: 0, y2: H - 14, class: "axisline"}));
+  rows.forEach((r, i) => {
+    const yy = PADT + i * (BAR + GAP);
+    const lbl = svgEl("text", {x: LBL - 8, y: yy + BAR / 2 + 4,
+      "text-anchor": "end", class: "lbl"});
+    lbl.textContent = r.label.length > 20 ? r.label.slice(0, 19) + "…" : r.label;
+    svg.appendChild(lbl);
+    const w = Math.max(2, Math.abs(r.v) / max * (iw / 2));
+    const bar = svgEl("rect", {x: r.v >= 0 ? mid : mid - w, y: yy,
+      width: w, height: BAR, rx: 4, fill: r.v >= 0 ? pos : neg});
+    svg.appendChild(bar);
+    const val = svgEl("text", {x: r.v >= 0 ? mid + w + 7 : mid - w - 7,
+      y: yy + BAR / 2 + 4, "text-anchor": r.v >= 0 ? "start" : "end", class: "val"});
+    val.textContent = fmtPct(r.v); svg.appendChild(val);
+    const hit = svgEl("rect", {x: 0, y: yy - GAP / 2, width: W, height: BAR + GAP,
+      fill: "transparent"});
+    hit.addEventListener("mousemove", evt => showTip(evt,
+      `<b>${r.label}</b><span class="m">estimate runs ${fmtPct(r.v)} vs actual ` +
+      `(${r.v >= 0 ? "over" : "under"}-estimating)</span>`));
+    hit.addEventListener("mouseleave", hideTip);
+    svg.appendChild(hit);
+  });
+  const t1 = svgEl("text", {x: LBL, y: H - 3, class: "tick"});
+  t1.textContent = "← under-estimates (danger: budgets pass that shouldn't)";
+  svg.appendChild(t1);
+  const t2 = svgEl("text", {x: W, y: H - 3, "text-anchor": "end", class: "tick"});
+  t2.textContent = "over-estimates →";
+  svg.appendChild(t2);
+}
+
+/* ---------- tables ---------- */
+function table(host, cols, rows, empty){
+  if (!rows.length) return emptyState(host, empty);
+  const h = `<tr>${cols.map(c =>
+    `<th class="${c.num ? "num" : ""}">${c.h}</th>`).join("")}</tr>`;
+  const body = rows.map(r => `<tr>${cols.map(c =>
+    `<td class="${c.num ? "num" : ""}">${c.f(r)}</td>`).join("")}</tr>`).join("");
+  host.innerHTML = `<table>${h}${body}</table>`;
+}
+
+/* ---------- data + render ---------- */
+let hours = 24, data = null;
+
+async function load(){
+  try {
+    const res = await fetch(`/admin/analytics?hours=${hours}`);
+    if (!res.ok) throw new Error((await res.json())?.error?.message || res.status);
+    data = await res.json();
+    render();
+  } catch (e){
+    $("kpis").innerHTML = "";
+    $("meta").textContent = `analytics unavailable: ${e.message}`;
+  }
+}
+
+function kpi(k, v, d, cls){
+  return `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div>
+    <div class="d ${cls || ""}">${d || ""}</div></div>`;
+}
+
+function fillHours(ts){
+  // The SQL only returns hours that had traffic; the line needs the gaps.
+  if (!ts.length) return [];
+  const byHour = Object.fromEntries(ts.map(r => [r.hour, r]));
+  const out = [], start = new Date(ts[0].hour + ":00Z"),
+    end = new Date(ts[ts.length - 1].hour + ":00Z");
+  for (let t = +start; t <= +end; t += 3600_000){
+    const key = new Date(t).toISOString().slice(0, 13) + ":00";
+    const r = byHour[key];
+    out.push({hour: key, requests: r?.requests || 0, spend_usd: r?.spend_usd || 0});
+  }
+  return out;
+}
+
+function render(){
+  if (!data) return;
+  const o = data.overview;
+  $("dbpath").textContent = data.db_path;
+  $("meta").textContent = `${o.requests} requests · last ${
+    hours < 24 ? hours + "h" : (hours / 24) + "d"}`;
+
+  $("kpis").innerHTML =
+    kpi("Requests", fmtNum(o.requests),
+      o.errors ? `${o.errors} errors` : "no errors", o.errors ? "bad" : "good") +
+    kpi("Spend", fmtUsd(o.spend_usd),
+      `est. drift ${o.estimate_error_mean == null ? "—" : fmtPct(o.estimate_error_mean)}`) +
+    kpi("Tokens", fmtNum(o.total_tokens),
+      `${fmtNum(o.prompt_tokens)} in · ${fmtNum(o.completion_tokens)} out`) +
+    kpi("Cache savings", fmtUsd(o.cache_savings_usd),
+      `${fmtNum(o.cache_read_tokens)} tokens read at ~0.1×`,
+      o.cache_savings_usd > 0 ? "good" : "") +
+    kpi("Routing misses", fmtPct(o.routing_miss_rate).replace("+", ""),
+      `${o.routing_misses} of ${o.ok} ok responses`,
+      o.routing_miss_rate > .05 ? "bad" : "good") +
+    kpi("Fallbacks", fmtPct(o.fallback_rate).replace("+", ""),
+      `${o.degraded} budget-degraded`) +
+    kpi("Refusals", fmtNum(o.refusals), "provider policy declines");
+
+  const ts = fillHours(data.timeseries);
+  lineChart($("chReq"), ts.map(r => ({label: r.hour.slice(5).replace("T", " "),
+    v: r.requests})));
+  lineChart($("chSpend"), ts.map(r => ({label: r.hour.slice(5).replace("T", " "),
+    v: r.spend_usd})), {fmt: fmtUsd, area: true});
+
+  const models = data.by_model;
+  barChart($("chModels"),
+    models.map(m => ({label: m.model, v: m.spend_usd, m})), {fmt: fmtUsd,
+      tipHtml: r => `<b>${r.label}</b><span class="m">${fmtUsd(r.v)} · ${r.m.requests
+        } req · saved ${fmtUsd(r.m.cache_savings_usd)}</span><span class="m">p50 ${
+        r.m.p50_upstream_ms ?? "—"}ms · p95 ${r.m.p95_upstream_ms ?? "—"}ms</span>`});
+
+  stackChart($("chCache"),
+    models.filter(m => m.cache_read_tokens || m.cache_write_tokens)
+      .map(m => ({label: m.model, a: m.cache_read_tokens, b: m.cache_write_tokens,
+        note: m.expected_warm ? `warm hits delivered ${m.delivered_warm}/${
+          m.expected_warm} expected` : ""})));
+
+  divergingChart($("chDrift"),
+    models.filter(m => m.estimate_error_mean != null)
+      .map(m => ({label: m.model, v: m.estimate_error_mean})));
+
+  const roleNote = {pilot: "wrote the cache first", follower: "waited, then read it",
+    warm: "already warm — free ride", timeout: "pilot never landed — paid cold",
+    disabled: "pilot off or prefix uncacheable"};
+  barChart($("chPilot"),
+    data.pilot_roles.map(r => ({label: r.role, v: r.requests})), {
+      tipHtml: r => `<b>${r.label}</b><span class="m">${fmtNum(r.v)} requests · ${
+        roleNote[r.label] || ""}</span>`});
+
+  table($("tblMisses"), [
+    {h: "model", f: r => r.model},
+    {h: "intent", f: r => r.intent},
+    {h: "misses", num: true, f: r => r.misses},
+    {h: "of", num: true, f: r => r.requests},
+    {h: "rate", num: true, f: r => (r.misses / r.requests * 100).toFixed(0) + "%"},
+  ], data.routing_misses, "No routing misses in this window — the pairings are holding.");
+
+  table($("tblIntents"), [
+    {h: "intent", f: r => r.intent},
+    {h: "requests", num: true, f: r => fmtNum(r.requests)},
+    {h: "spend", num: true, f: r => fmtUsd(r.spend_usd)},
+    {h: "misses", num: true, f: r => r.routing_misses},
+    {h: "avg out tokens", num: true, f: r => fmtNum(Math.round(r.avg_completion_tokens))},
+  ], data.by_intent, "No traffic in this window.");
+}
+
+$("range").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  [...$("range").children].forEach(x => x.classList.toggle("on", x === b));
+  hours = +b.dataset.h;
+  load();
+});
+
+load();
+setInterval(load, 15_000);   // live-ish; the queries are windowed and indexed
+</script>
+</body>
+</html>

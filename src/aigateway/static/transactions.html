@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moon — Transactions</title>
+<style>
+/* Same tokens as the analytics page — one system, two views. */
+:root{
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e;
+  --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7;
+  --border:rgba(11,11,11,.10);
+  --s1:#2a78d6; --good:#0ca30c; --goodtext:#006300; --warn:#fab219; --crit:#d03b3b;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --axis:#383835;
+    --border:rgba(255,255,255,.10);
+    --s1:#3987e5; --goodtext:#0ca30c;
+  }
+}
+:root[data-theme="dark"]{
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7;
+  --muted:#898781; --grid:#2c2c2a; --axis:#383835;
+  --border:rgba(255,255,255,.10);
+  --s1:#3987e5; --goodtext:#0ca30c;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);
+  font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:var(--s1);text-decoration:none}
+code,.mono{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+header{padding:14px 20px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+h1{font-size:17px;margin:0;font-weight:650}
+h1 span{color:var(--muted);font-weight:450}
+.spacer{flex:1}
+.range{display:flex;gap:2px;background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;padding:2px}
+.range button{border:0;background:none;color:var(--ink2);padding:5px 11px;
+  border-radius:6px;cursor:pointer;font:inherit;font-size:13px}
+.range button:hover{background:var(--grid)}
+.range button.on{color:var(--ink);font-weight:650;background:var(--grid)}
+button.ghost,a.ghost{border:1px solid var(--border);background:var(--surface);color:var(--ink2);
+  border-radius:8px;padding:5px 11px;cursor:pointer;font:inherit;font-size:13px;display:inline-block}
+select{border:1px solid var(--border);background:var(--surface);color:var(--ink);
+  border-radius:8px;padding:5px 8px;font:inherit;font-size:13px;max-width:170px}
+.wrap{max-width:1360px;margin:0 auto;padding:16px 20px 40px}
+.filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.filters label{font-size:12px;color:var(--muted)}
+.note{color:var(--muted);font-size:12.5px;margin:8px 0}
+.scroll{overflow-x:auto;background:var(--surface);border:1px solid var(--border);
+  border-radius:10px}
+table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:1100px}
+th{color:var(--muted);font-weight:500;text-align:left;padding:8px 10px;
+  border-bottom:1px solid var(--grid);font-size:11.5px;white-space:nowrap;
+  position:sticky;top:0;background:var(--surface)}
+td{padding:7px 10px;border-bottom:1px solid var(--grid);vertical-align:top;
+  white-space:nowrap}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.row{cursor:pointer}
+tr.row:hover td{background:color-mix(in srgb, var(--grid) 40%, transparent)}
+tr.row.open td{background:color-mix(in srgb, var(--s1) 8%, transparent)}
+tr:last-child td{border-bottom:0}
+.chip{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;
+  border:1px solid var(--border);color:var(--ink2)}
+.oc-ok{color:var(--goodtext)}
+.oc-refusal{color:var(--warn)}
+.oc-bad{color:var(--crit)}
+.oc-muted{color:var(--muted)}
+.t-light{background:#9ec5f4}.t-standard{background:var(--s1)}.t-heavy{background:#104281}
+.tiersw{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px}
+/* detail row */
+tr.detail>td{white-space:normal;background:color-mix(in srgb, var(--grid) 30%, transparent);
+  padding:12px 16px}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px 22px;
+  margin-bottom:10px}
+.dgrid .k{font-size:11px;color:var(--muted)}
+.dgrid .v{font-size:12.5px;margin-top:1px;word-break:break-word}
+.dtable{min-width:0;font-size:12px;margin-top:4px}
+.dtable th{position:static}
+.reason{font-size:12px;color:var(--ink2);background:var(--surface);
+  border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin:6px 0;
+  font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word}
+.err{border-left:3px solid var(--crit)}
+.footerrow{display:flex;gap:10px;align-items:center;margin-top:12px}
+.empty{color:var(--muted);padding:40px 0;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>Moon <span>— Transactions</span></h1>
+  <span class="note" id="meta" style="margin:0"></span>
+  <div class="spacer"></div>
+  <div class="range" id="range">
+    <button data-h="1">1h</button>
+    <button data-h="24" class="on">24h</button>
+    <button data-h="168">7d</button>
+    <button data-h="720">30d</button>
+    <button data-h="0">all</button>
+  </div>
+  <button class="ghost" id="themeBtn">◐ Theme</button>
+  <a href="/analytics" class="ghost">Analytics →</a>
+  <a href="/db" class="ghost">DB →</a>
+  <a href="/" class="ghost">Console →</a>
+</header>
+
+<div class="wrap">
+  <div class="filters">
+    <label>outcome</label><select id="fOutcome"><option value="">all</option></select>
+    <label>model</label><select id="fModel"><option value="">all</option></select>
+    <label>intent</label><select id="fIntent"><option value="">all</option></select>
+    <label>tenant</label><select id="fTenant"><option value="">all</option></select>
+    <button class="ghost" id="refreshBtn">↻ Refresh</button>
+    <span class="note" id="autoNote" style="margin:0"></span>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <thead><tr>
+        <th>time</th><th>trace</th><th>tenant · agent</th><th>intent</th>
+        <th>model</th><th>cache</th>
+        <th class="num">tokens in/out</th><th class="num">cost</th>
+        <th class="num">llm / gw ms</th><th>outcome</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <div class="footerrow">
+    <button class="ghost" id="moreBtn" style="display:none">Load older…</button>
+    <span class="note" id="pageNote" style="margin:0"></span>
+  </div>
+  <div class="note">Every row is one line in <code id="dbpath">var/records.db</code> —
+    click a row for the full decision record: what was considered, why this model won,
+    what the quality checks said, and what the request actually cost.</div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+/* ---------- theme ---------- */
+const savedTheme = localStorage.getItem("moon-theme");
+if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+$("themeBtn").onclick = () => {
+  const cur = document.documentElement.dataset.theme ||
+    (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem("moon-theme", next);
+};
+
+/* ---------- fmt ---------- */
+const esc = s => String(s ?? "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+const usd = v => v == null ? "—" : v >= 1 ? "$" + v.toFixed(2)
+  : "$" + v.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+const num = v => (v ?? 0).toLocaleString();
+const when = t => {
+  const d = new Date(t * 1000);
+  const today = new Date().toDateString() === d.toDateString();
+  return (today ? "" : (d.getMonth()+1) + "/" + d.getDate() + " ")
+    + d.toTimeString().slice(0, 8);
+};
+const OC = o => o === "ok" ? "oc-ok" : o === "refusal" ? "oc-refusal"
+  : o === "client_disconnected" ? "oc-muted" : "oc-bad";
+
+/* ---------- state ---------- */
+let hours = 24, cursor = null, paged = false, rows = [];
+const filters = { outcome: "", model: "", intent: "", tenant: "" };
+
+function qs() {
+  const p = new URLSearchParams({ hours, limit: 50 });
+  if (cursor) p.set("before", cursor);
+  for (const [k, v] of Object.entries(filters)) if (v) p.set(k, v);
+  return p.toString();
+}
+
+async function load(append = false) {
+  const res = await fetch("/admin/transactions?" + qs());
+  if (!res.ok) {
+    $("rows").innerHTML = `<tr><td colspan="10" class="empty">${
+      esc((await res.json().catch(() => ({})))?.error?.message || "unavailable")}</td></tr>`;
+    return;
+  }
+  const d = await res.json();
+  $("dbpath").textContent = d.db_path;
+  rows = append ? rows.concat(d.rows) : d.rows;
+  cursor = d.next_before;
+  $("moreBtn").style.display = cursor ? "" : "none";
+  fillFacets(d.facets);
+  render();
+}
+
+function fillFacets(f) {
+  const fill = (el, values, current) => {
+    el.innerHTML = '<option value="">all</option>' + values.map(v =>
+      `<option${v === current ? " selected" : ""}>${esc(v)}</option>`).join("");
+  };
+  fill($("fOutcome"), f.outcomes, filters.outcome);
+  fill($("fModel"), f.models, filters.model);
+  fill($("fIntent"), f.intents, filters.intent);
+  fill($("fTenant"), f.tenants, filters.tenant);
+}
+
+function render() {
+  $("meta").textContent = `${rows.length} shown · last ${hours ? (hours < 24 ? hours + "h" : hours / 24 + "d") : "∀"}`;
+  $("pageNote").textContent = cursor ? "older records available" : "end of window";
+  if (!rows.length) {
+    $("rows").innerHTML = '<tr><td colspan="10" class="empty">No transactions match.</td></tr>';
+    return;
+  }
+  $("rows").innerHTML = rows.map((r, i) => {
+    const gw = Math.max(0, (r.gateway_overhead_ms || 0));
+    const tier = (r.tier || "").toLowerCase();
+    return `<tr class="row" data-i="${i}">
+      <td class="mono">${when(r.timestamp)}</td>
+      <td class="mono" title="${esc(r.trace_id)}">${esc(r.trace_id.slice(0, 8))}</td>
+      <td>${esc(r.tenant)}<span style="color:var(--muted)"> · ${esc(r.agent)}</span></td>
+      <td>${esc(r.resolved_intent)}${r.intent_source ? ` <span class="chip">${esc(r.intent_source)}</span>` : ""}</td>
+      <td><span class="tiersw t-${tier}"></span>${esc(r.chosen_model || "—")}</td>
+      <td>${esc(r.cache_state || "—")}${r.pilot_role && r.pilot_role !== "disabled"
+          ? ` <span class="chip">${esc(r.pilot_role)}</span>` : ""}</td>
+      <td class="num">${num(r.prompt_tokens)} / ${num(r.completion_tokens)}${
+          r.cache_read_tokens ? `<br><span class="oc-ok">${num(r.cache_read_tokens)} cached</span>` : ""}</td>
+      <td class="num">${usd(r.actual_cost_usd)}${
+          r.cache_savings_usd ? `<br><span class="oc-ok">−${usd(r.cache_savings_usd)}</span>` : ""}</td>
+      <td class="num">${num(r.upstream_ms)} / ${num(gw)}</td>
+      <td class="${OC(r.outcome)}">${esc(r.outcome)}${
+          r.outcome === "ok" && r.quality_verdict && r.quality_verdict !== "pass"
+          ? ` <span class="oc-refusal">quality: ${esc(r.quality_verdict)}</span>` : ""}</td>
+    </tr>`;
+  }).join("");
+  document.querySelectorAll("tr.row").forEach(tr => tr.onclick = () => toggle(tr));
+}
+
+function toggle(tr) {
+  paged = true;  // a human is reading; stop the table shifting underneath them
+  const open = tr.classList.contains("open");
+  document.querySelectorAll("tr.detail").forEach(d => d.remove());
+  document.querySelectorAll("tr.row.open").forEach(o => o.classList.remove("open"));
+  if (open) return;
+  tr.classList.add("open");
+  const r = rows[+tr.dataset.i];
+  const drift = r.actual_cost_usd
+    ? ((r.estimated_cost_usd - r.actual_cost_usd) / r.actual_cost_usd * 100).toFixed(1) + "%"
+    : "—";
+  const detail = document.createElement("tr");
+  detail.className = "detail";
+  detail.innerHTML = `<td colspan="10">
+    <div class="dgrid">
+      <div><div class="k">trace · session</div><div class="v mono">${esc(r.trace_id)}<br>${esc(r.session_id || "—")}</div></div>
+      <div><div class="k">intent</div><div class="v">${esc(r.resolved_intent)}
+        (${esc(r.intent_source)}, ${Math.round((r.intent_confidence || 0) * 100)}%)${
+        r.declared_intent ? `<br>declared: ${esc(r.declared_intent)}` : ""}</div></div>
+      <div><div class="k">cost</div><div class="v">actual ${usd(r.actual_cost_usd)} ·
+        estimated ${usd(r.estimated_cost_usd)} (drift ${drift})${
+        r.cache_savings_usd ? `<br>cache saved ${usd(r.cache_savings_usd)}` : ""}</div></div>
+      <div><div class="k">tokens</div><div class="v">${num(r.prompt_tokens)} in ·
+        ${num(r.completion_tokens)} out<br>${num(r.cache_read_tokens)} cache-read ·
+        ${num(r.cache_write_tokens)} cache-written</div></div>
+      <div><div class="k">latency</div><div class="v">total ${num(r.latency_total_ms)}ms ·
+        llm ${num(r.upstream_ms)}ms · gateway ${num(r.gateway_overhead_ms)}ms<br>
+        ${r.hop_count || 0} hops · ${(r.hosts_contacted || []).map(esc).join(", ") || "no hosts"}</div></div>
+      <div><div class="k">cache plan · pilot</div><div class="v">${esc(r.cache_plan || "—")}<br>
+        ${esc(r.cache_state)} · pilot: ${esc(r.pilot_role || "—")}</div></div>
+      <div><div class="k">quality</div><div class="v">${esc(r.quality_verdict || "—")}${
+        (r.quality_failures || []).length
+          ? `<br><span class="oc-bad">${r.quality_failures.map(esc).join(", ")}</span>` : ""}
+        · routing ${r.routing_ok ? "ok" : '<span class="oc-bad">miss</span>'}${
+        r.extra_effort ? `<br>extra effort ${r.extra_effort}` : ""}</div></div>
+      <div><div class="k">fallbacks · degraded</div><div class="v">${
+        (r.fallback_chain || []).map(esc).join(" → ") || "none"} ·
+        ${r.degraded ? '<span class="oc-refusal">budget-degraded</span>' : "not degraded"}</div></div>
+    </div>
+    <div class="k" style="font-size:11px;color:var(--muted)">routing reason</div>
+    <div class="reason">${esc(r.routing_reason || "—")}</div>
+    ${r.error ? `<div class="k" style="font-size:11px;color:var(--muted)">error</div>
+      <div class="reason err">${esc(r.error)}</div>` : ""}
+    ${(r.considered || []).length ? `
+      <div class="k" style="font-size:11px;color:var(--muted);margin-top:6px">considered
+        (${r.considered.length} candidates)</div>
+      <table class="dtable"><thead><tr><th>model</th><th class="num">est cost</th>
+        <th>cache</th></tr></thead><tbody>
+      ${r.considered.map(c => `<tr${c.model === r.chosen_model
+          ? ' style="font-weight:650"' : ""}>
+        <td>${esc(c.model)}${c.model === r.chosen_model ? " ←" : ""}</td>
+        <td class="num">${usd(c.cost_usd)}</td><td>${esc(c.cache || c.cache_state || "")}</td>
+      </tr>`).join("")}</tbody></table>` : ""}
+  </td>`;
+  tr.after(detail);
+}
+
+/* ---------- controls ---------- */
+$("range").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  [...$("range").children].forEach(x => x.classList.toggle("on", x === b));
+  hours = +b.dataset.h; cursor = null; paged = false;
+  load();
+});
+for (const [id, key] of [["fOutcome","outcome"],["fModel","model"],["fIntent","intent"],["fTenant","tenant"]]) {
+  $(id).onchange = () => { filters[key] = $(id).value; cursor = null; paged = false; load(); };
+}
+$("refreshBtn").onclick = () => { cursor = null; paged = false; load(); };
+$("moreBtn").onclick = () => { paged = true; load(true); };
+
+load();
+setInterval(() => {
+  // Only the live head auto-refreshes. Once a human pages back or opens a
+  // detail, the table stops moving under them.
+  if (!paged) { cursor = null; load(); $("autoNote").textContent = "live · 15s"; }
+  else $("autoNote").textContent = "paused (↻ to resume live)";
+}, 15_000);
+</script>
+</body>
+</html>

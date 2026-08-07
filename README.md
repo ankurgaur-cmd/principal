@@ -13,8 +13,9 @@ prompt cache** — which is the part naive routers get wrong.
   four turns to get one answer — gets more expensive in the router's eyes.
 - **Cross-vendor.** Anthropic and OpenAI behind one schema, with vendor quirks
   absorbed rather than leaked.
-- **Governed.** Per-tenant budgets, rate limits, cost attribution, and a JSONL
-  record per request that feeds an offline replay harness.
+- **Governed.** Per-tenant budgets, rate limits, cost attribution, and a
+  per-request record in a SQLite database that feeds an offline replay harness
+  and an analytics dashboard at `/analytics`.
 
 Design rationale, decision records (D1–D26), failure modes, and known gaps:
 **[ARCHITECTURE.md](ARCHITECTURE.md)**. How the gateway decides what you asked
@@ -49,7 +50,7 @@ python3 -m venv .venv && ./.venv/bin/pip install -e ".[dev]"
 ./.venv/bin/uvicorn aigateway.main:app --reload
 ```
 
-Then open **<http://localhost:8000/>** — the demo console, on **port 8000**. No
+Then open **<http://localhost:8080/>** — the demo console, on **port 8080**. No
 keys needed to start; paste them into the **API keys** panel (tab 4).
 
 ```bash
@@ -144,7 +145,7 @@ from the environment.
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused-in-dev-mode")
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused-in-dev-mode")
 
 resp = client.chat.completions.create(
     model="auto",                      # 'auto' delegates to the router
@@ -186,7 +187,7 @@ increasing order of "you are overriding a decision":
 ### See the reasoning without spending anything
 
 ```bash
-curl -s localhost:8000/admin/route/preview -H 'content-type: application/json' -d '{
+curl -s localhost:8080/admin/route/preview -H 'content-type: application/json' -d '{
   "model": "auto",
   "messages": [{"role":"user","content":"Review this diff for security issues"}]
 }' | jq '.explain'
@@ -211,7 +212,7 @@ with `model: "auto"`, and the gateway routes each one independently.
 ### Fan-out — N agents, one shared prefix
 
 ```bash
-curl -s localhost:8000/demo/fanout -H 'content-type: application/json' -d '{
+curl -s localhost:8080/demo/fanout -H 'content-type: application/json' -d '{
   "prompt": "Review the capture retry change.",
   "shared_context": "<your large standing instruction>",
   "agents": 6,
@@ -244,7 +245,7 @@ both ways and compare `total_cache_write_tokens`.
 ### Fan-in — scatter, then gather
 
 ```bash
-curl -s localhost:8000/demo/fanin -H 'content-type: application/json' -d '{
+curl -s localhost:8080/demo/fanin -H 'content-type: application/json' -d '{
   "task": "Should we adopt prompt caching?",
   "subtasks": ["Cost impact?", "Latency impact?", "Operational risk?"],
   "shared_context": "<standing instruction>",
@@ -374,7 +375,7 @@ a human in the loop and are registered but inert until your orchestrator reports
 them:
 
 ```bash
-curl -s localhost:8000/admin/effort -H 'content-type: application/json' -d '{
+curl -s localhost:8080/admin/effort -H 'content-type: application/json' -d '{
   "model": "gpt-5-nano", "intent": "code_review",
   "turns_to_goal": 5, "user_reasked": true, "manual_escalation": true
 }' | jq '{extra_effort: .scored.extra_effort, multiplier_now}'
@@ -398,10 +399,29 @@ Every signal is normalised against the *same intent's* norm, never an absolute
 threshold — otherwise you punish whichever model gets handed the hard problems,
 which is exactly backwards.
 
+### Ask the record anything
+
+Every request lands as one row in `var/records.db` — plain SQLite, so it opens
+everywhere, agents included:
+
+```bash
+sqlite3 var/records.db \
+  "SELECT chosen_model, ROUND(SUM(actual_cost_usd),4), SUM(cache_read_tokens)
+   FROM records GROUP BY 1 ORDER BY 2 DESC"
+
+duckdb -c "SELECT resolved_intent, COUNT(*), AVG(latency_total_ms)
+           FROM sqlite_scan('var/records.db','records') GROUP BY 1"
+```
+
+The dashboard at **`/analytics`** renders the aggregates worth watching without
+leaving the browser: spend and total tokens across all transactions, cache
+reads vs writes per model, cost-estimate drift (budget enforcement trusts the
+estimate), pilot outcomes, and routing misses by (model, intent).
+
 ### Prove the policy is worth it
 
 ```bash
-./.venv/bin/python -m aigateway.replay.harness var/records.jsonl
+./.venv/bin/python -m aigateway.replay.harness var/records.db
 ```
 
 Re-scores recorded traffic against alternative policies — always-frontier,
@@ -463,8 +483,8 @@ running the serving path minimal, not as a latency fix.
   Re-check when the model line-up changes.
 
 ```bash
-curl -s localhost:8000/admin/usage/demo | jq          # spend and limits
-curl -s -X POST localhost:8000/admin/limits/demo \
+curl -s localhost:8080/admin/usage/demo | jq          # spend and limits
+curl -s -X POST localhost:8080/admin/limits/demo \
   -H 'content-type: application/json' -d '{"daily_usd": 25, "rpm": 120}'
 ```
 
@@ -484,6 +504,7 @@ curl -s -X POST localhost:8000/admin/limits/demo \
 | `GET  /admin/policy` | Current intent → tier table |
 | **Observability** | |
 | `GET  /admin/fleet` · `POST /admin/fleet/reset` | Where traffic goes, per server and per flow |
+| `GET  /admin/analytics?hours=24` | Durable aggregates over the record DB — spend, tokens, cache economics, estimate drift, routing misses |
 | `GET  /admin/baselines` | Latency baselines behind every colour on the pipeline |
 | `GET  /admin/reputation` · `POST /admin/reputation/reset` | Per (model, intent) quality and effort |
 | `POST /admin/effort` | Report caller-side effort for work already served |
@@ -496,7 +517,8 @@ curl -s -X POST localhost:8000/admin/limits/demo \
 | **Governance** | |
 | `GET  /admin/usage/{tenant}` · `POST /admin/limits/{tenant}` | Spend, limits, utilisation |
 | **Credentials (dev mode only)** | |
-| `GET/POST /admin/credentials` · `DELETE /admin/credentials/{provider}` | Masked status; set and validate; remove |
+| `GET/POST /admin/credentials` · `DELETE /admin/credentials/{provider}` | Masked status; set and validate; remove. Accepts API keys and Anthropic subscription OAuth tokens (`sk-ant-oat…`, auto-detected) |
+| `GET /admin/prices` · `POST /admin/prices/refresh` | Catalog rates with provenance; pull the live price feed now (a daily pull runs automatically) |
 | **Demo** | |
 | `POST /demo/trace` | SSE: stream each pipeline stage with its baseline verdict |
 | `POST /demo/fanout` | N sub-agents on one shared prefix; pilot on/off |
@@ -546,12 +568,14 @@ src/aigateway/
   providers/         Anthropic + OpenAI adapters, fallback chain, pool health
   governance/        budgets, rate limits, cost ledger
   observability/
-    record.py        per-request JSONL record
+    record.py        the per-request record (and the legacy JSONL sink)
+    db.py            SQLite record store + the /admin/analytics aggregates
     hops.py          per-transaction hop trace
     fleet.py         rolling fleet aggregate
     baselines.py     learned latency baselines and banding
   replay/            offline policy comparison
-  static/index.html  the console
+  static/index.html      the console
+  static/analytics.html  the analytics dashboard (/analytics)
 ```
 
 ## Tests

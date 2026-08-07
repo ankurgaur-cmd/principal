@@ -128,6 +128,11 @@ class HealthMonitor:
                 model_key, h.consecutive_failures, h.last_error,
             )
 
+    def p50_of(self, model_key: str) -> int | None:
+        """Observed median latency, for anyone sizing a wait around this model."""
+        h = self._health.get(model_key)
+        return h.p50_ms if h else None
+
     # -- breaker gate -------------------------------------------------------
     def is_available(self, model_key: str) -> bool:
         """False only when the breaker is open and still cooling down."""

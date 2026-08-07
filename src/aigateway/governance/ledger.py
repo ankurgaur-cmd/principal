@@ -25,6 +25,10 @@ class PricedUsage:
     input_cache_read_usd: float
     input_cache_write_usd: float
     output_usd: float
+    # Set by price_usage from the *model's* read multiplier. A hardcoded
+    # "read is 0.1x" here overstated savings for any model whose discount
+    # differs — the multiplier is catalog data, not a constant.
+    cache_savings_usd: float = 0.0
 
     @property
     def total_usd(self) -> float:
@@ -34,13 +38,6 @@ class PricedUsage:
             + self.input_cache_write_usd
             + self.output_usd
         )
-
-    @property
-    def cache_savings_usd(self) -> float:
-        """What the cache-read tokens would have cost at the fresh rate."""
-        if self.input_cache_read_usd == 0:
-            return 0.0
-        return self.input_cache_read_usd * 9.0  # read is 0.1x; saved 0.9x
 
 
 def price_usage(usage: Usage, model: ModelSpec, cache_ttl: str = "5m") -> PricedUsage:
@@ -59,6 +56,10 @@ def price_usage(usage: Usage, model: ModelSpec, cache_ttl: str = "5m") -> Priced
         * price_in
         * model.cache_write_multiplier(cache_ttl),
         output_usd=usage.completion_tokens * price_out,
+        # What those tokens would have cost fresh, minus what they cost cached.
+        cache_savings_usd=usage.cache_read_tokens
+        * price_in
+        * (1.0 - model.cache_read_multiplier),
     )
 
 
@@ -79,16 +80,41 @@ class CostLedger:
         return f"spend:{tenant}:{self._day()}:{agent}:{model}"
 
     async def record(
-        self, tenant: str, agent: str, model_key: str, priced: PricedUsage
+        self,
+        tenant: str,
+        agent: str,
+        model_key: str,
+        priced: PricedUsage,
+        reserved_usd: float = 0.0,
     ) -> float:
+        """Record actual spend; ``reserved_usd`` is what check() already took.
+
+        With a reservation, only the estimate-vs-actual delta lands here, so
+        the tenant counter is never double-charged. Attribution always gets the
+        full actual figure — chargeback wants what happened, not the mechanics
+        of how enforcement counted it.
+        """
         # 48h TTL: long enough to survive a UTC day boundary plus inspection.
         total = await self._store.incr_float(
-            self._tenant_key(tenant), priced.total_usd, ttl=172_800
+            self._tenant_key(tenant), priced.total_usd - reserved_usd, ttl=172_800
         )
         await self._store.incr_float(
             self._attr_key(tenant, agent, model_key), priced.total_usd, ttl=172_800
         )
         return total
+
+    async def reserve(self, tenant: str, amount_usd: float) -> float:
+        """Atomically add a pending estimate to today's spend; returns the total."""
+        return await self._store.incr_float(
+            self._tenant_key(tenant), amount_usd, ttl=172_800
+        )
+
+    async def release(self, tenant: str, amount_usd: float) -> None:
+        """Give a reservation back — the request was rejected or never priced."""
+        if amount_usd:
+            await self._store.incr_float(
+                self._tenant_key(tenant), -amount_usd, ttl=172_800
+            )
 
     async def spend_today(self, tenant: str) -> float:
         return await self._store.get_float(self._tenant_key(tenant))

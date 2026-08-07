@@ -36,6 +36,10 @@ class BudgetVerdict:
     utilisation: float
     needs_exact_preflight: bool
     message: str = ""
+    # Hard mode only: the estimate already counted against today's spend. The
+    # pipeline settles the difference against actuals, or releases it if the
+    # request never gets priced.
+    reserved_usd: float = 0.0
 
 
 class BudgetGuard:
@@ -43,6 +47,10 @@ class BudgetGuard:
         self._s = settings
         self._store = store
         self._ledger = ledger
+
+    async def release(self, tenant: str, verdict: BudgetVerdict) -> None:
+        """The reserved estimate never became spend — give it back."""
+        await self._ledger.release(tenant, verdict.reserved_usd)
 
     async def limit_for(self, tenant: str) -> float:
         override = await self._store.get(f"budget:{tenant}:daily_usd")
@@ -52,8 +60,32 @@ class BudgetGuard:
         await self._store.set(f"budget:{tenant}:daily_usd", str(usd))
 
     async def check(self, tenant: str, estimated_usd: float) -> BudgetVerdict:
-        spend = await self._ledger.spend_today(tenant)
         limit = await self.limit_for(tenant)
+
+        if self._s.budget_mode == "hard":
+            # Hard enforcement must not race: read-then-record lets K concurrent
+            # requests all pass against the same snapshot and overshoot by K×
+            # the request cost. So the estimate is *taken* atomically here and
+            # settled against actuals after the call. Soft mode keeps the cheap
+            # read — its whole point is to degrade rather than reject, and a
+            # transient overshoot only accelerates a degradation that was
+            # coming anyway.
+            projected = await self._ledger.reserve(tenant, estimated_usd)
+            spend = projected - estimated_usd
+            utilisation = projected / limit if limit > 0 else 0.0
+            if projected > limit:
+                await self._ledger.release(tenant, estimated_usd)
+                raise BudgetExceeded(
+                    f"tenant '{tenant}' daily budget exhausted "
+                    f"(${spend:.4f} spent of ${limit:.2f}); request rejected"
+                )
+            return BudgetVerdict(
+                True, None, spend, limit, utilisation,
+                utilisation >= self._s.preflight_exact_threshold,
+                reserved_usd=estimated_usd,
+            )
+
+        spend = await self._ledger.spend_today(tenant)
         projected = spend + estimated_usd
         utilisation = projected / limit if limit > 0 else 0.0
 
@@ -63,12 +95,6 @@ class BudgetGuard:
 
         if projected <= limit:
             return BudgetVerdict(True, None, spend, limit, utilisation, needs_exact)
-
-        if self._s.budget_mode == "hard":
-            raise BudgetExceeded(
-                f"tenant '{tenant}' daily budget exhausted "
-                f"(${spend:.4f} spent of ${limit:.2f}); request rejected"
-            )
 
         # Soft mode: degrade before failing. If even the cheapest tier cannot
         # fit, there is nothing left to degrade to.

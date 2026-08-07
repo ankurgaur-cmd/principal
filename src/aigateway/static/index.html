@@ -111,6 +111,40 @@ button.sm{padding:4px 10px;font-size:12px}
 .conn path{stroke:var(--baseline);stroke-width:2;fill:none;transition:stroke .2s}
 .conn.lit path{stroke:var(--series-1)}
 @media (max-width:900px){.conn{transform:rotate(90deg);min-height:18px}}
+/* ---- live worker lanes (agent patterns tab) --------------------------
+   One compact pipeline per worker. The full four-node flow from tab 1 would
+   not survive being drawn six times, so each lane is the same stages reduced
+   to dots — enough to see progress, stalls and divergence at a glance — with
+   the numbers accumulating on the right as stages land. */
+.lanes{display:flex;flex-direction:column;gap:6px;margin:10px 0}
+.lane{display:flex;align-items:center;gap:10px;border:1px solid var(--border);
+  border-radius:8px;padding:7px 11px;background:var(--page);font-size:12px;
+  transition:border-color .2s}
+.lane.done{border-color:var(--baseline)}
+.lane.err{border-color:var(--critical)}
+.lane .lw{font-weight:600;min-width:40px;font-family:var(--mono);font-size:11.5px}
+.lane .lstages{display:flex;gap:5px;flex:none}
+.lane .lst{width:11px;height:11px;border-radius:3px;background:var(--baseline);
+  opacity:.3;transition:opacity .15s,background .15s}
+.lane .lst.on{opacity:1;background:var(--series-1)}
+.lane .lst.err{opacity:1;background:var(--critical)}
+.lane .lmeta{color:var(--text-secondary);margin-left:auto;font-family:var(--mono);
+  font-size:11px;text-align:right;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;min-width:0}
+/* The unified feed: every worker's stages, merged in the order they actually
+   happened, one line per event. */
+.livefeed{font-family:var(--mono);font-size:11.5px;line-height:1.6;background:var(--page);
+  border:1px solid var(--border);border-radius:8px;padding:8px 11px;max-height:230px;
+  overflow:auto;margin:10px 0;white-space:pre}
+/* Running totals for the run: what the gateway itself is costing, live. */
+.ltotals{font-family:var(--mono);font-size:11.5px;color:var(--text-secondary);
+  margin:6px 0 2px;white-space:nowrap;overflow-x:auto}
+.ltotals b{color:var(--text-primary)}
+.livefeed .ft{color:var(--text-muted)}
+.livefeed .fw{color:var(--series-1);font-weight:600}
+.livefeed .fs{color:var(--text-primary)}
+.livefeed .fd{color:var(--text-secondary)}
+.livefeed .ferr{color:var(--critical)}
 /* ---- system alert ----------------------------------------------------
    Calm on purpose. An outage banner competes with the thing it is warning
    about: a saturated red block that pulses hard reads as panic, gets
@@ -318,6 +352,12 @@ details summary{cursor:pointer;font-size:12px;color:var(--text-secondary)}
     <span class="pill" id="providers"><span class="dot"></span> checking…</span>
     <span class="pill" id="stateBackend">state: —</span>
     <div class="spacer"></div>
+    <a class="sm" href="/analytics" style="padding:4px 10px;font-size:12px;border:1px solid var(--border);
+      border-radius:8px;color:var(--text-secondary);text-decoration:none">Analytics</a>
+    <a class="sm" href="/transactions" style="padding:4px 10px;font-size:12px;border:1px solid var(--border);
+      border-radius:8px;color:var(--text-secondary);text-decoration:none">Transactions</a>
+    <a class="sm" href="/db" style="padding:4px 10px;font-size:12px;border:1px solid var(--border);
+      border-radius:8px;color:var(--text-secondary);text-decoration:none">DB</a>
     <button class="sm" id="themeBtn">◐ Theme</button>
   </div>
   <div class="tabs">
@@ -484,6 +524,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--text-secondary)}
           write is legitimately slower than a warm read. Pooling them would paint every cold
           request red. Hover any stage for its mean, σ, p50/p95 and sample count, or read
           <code>/admin/baselines</code> for the numbers behind every colour.</div>
+        <div class="ltotals" id="timeSplit" style="display:none;margin-top:12px"></div>
         <div id="reason" class="reason" style="margin-top:14px">Send a query to watch it routed.</div>
       </div>
 
@@ -619,6 +660,7 @@ The author says existing tests still pass. What test would fail without this cha
             receives the identical prompt instead — which is what made them all look the same.</div>
           <div class="row" style="margin-top:12px"><button class="primary" id="fanBtn">Run fan-out</button></div>
           <div class="hint">Run enabled, then disabled, and compare total writes.</div>
+          <div id="fanLive"></div>
           <div id="fanResult" style="margin-top:12px"></div>
         </div>
       </div>
@@ -641,6 +683,7 @@ Review prompt caching for correctness risks and race conditions</textarea>
           <label for="fiCtx">Shared context</label>
           <textarea id="fiCtx" style="min-height:42px">You are advising a payments platform on LLM infrastructure.</textarea>
           <div class="row" style="margin-top:12px"><button class="primary" id="fiBtn">Run fan-in</button></div>
+          <div id="fiLive"></div>
           <div id="fiResult" style="margin-top:12px"></div>
         </div>
       </div>
@@ -712,16 +755,27 @@ Review prompt caching for correctness risks and race conditions</textarea>
     <div class="grid">
       <div>
         <div class="card" id="credCard">
-          <h2>API keys</h2>
+          <h2>Accounts &amp; keys</h2>
           <div id="credStatus"></div>
           <details id="credForm" style="margin-top:12px">
-            <summary>Add or replace a key</summary>
+            <summary>Connect an account or key</summary>
             <div style="margin-top:10px">
+              <div class="hint" style="margin-top:0">
+                <b>Anthropic</b> — <a href="https://console.anthropic.com/settings/keys"
+                  target="_blank" rel="noopener">create an API key</a>, or use your Claude
+                <i>subscription</i>: run <code>claude setup-token</code> in a terminal signed
+                into your account and paste the <code>sk-ant-oat…</code> token below. The
+                gateway detects it and sends it as subscription auth.<br>
+                <b>OpenAI</b> — <a href="https://platform.openai.com/api-keys"
+                  target="_blank" rel="noopener">create an API key</a>. A ChatGPT
+                subscription has no API access, so an API key is the only credential.
+              </div>
               <div class="row">
                 <div><label for="credProvider">Provider</label><select id="credProvider">
                   <option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select></div>
-                <div><label for="credKey">API key</label>
-                  <input type="password" id="credKey" placeholder="sk-…" autocomplete="off" spellcheck="false"></div>
+                <div><label for="credKey">API key or subscription token</label>
+                  <input type="password" id="credKey" placeholder="sk-… / sk-ant-oat…"
+                    autocomplete="off" spellcheck="false"></div>
               </div>
               <label style="display:flex;align-items:center;gap:7px;margin-top:10px">
                 <input type="checkbox" id="credPersist" style="width:auto;margin:0">
@@ -730,8 +784,7 @@ Review prompt caching for correctness risks and race conditions</textarea>
                 <button class="primary" id="credSave">Validate &amp; use</button>
                 <button id="credAmbient">Use ambient</button></div>
               <div class="hint">Checked against the vendor's free models endpoint — no tokens
-                spent. Held in memory unless you tick the box; never logged, never returned.
-                A Claude.ai or ChatGPT <i>subscription</i> is not API access.</div>
+                spent. Held in memory unless you tick the box; never logged, never returned.</div>
             </div>
           </details>
           <div id="credMsg" style="margin-top:10px"></div>
@@ -750,8 +803,10 @@ Review prompt caching for correctness risks and race conditions</textarea>
             <span style="margin-left:auto">
               <button class="sm" id="probeBtn">Probe now</button>
               <button class="sm" id="breakerBtn">Reset breakers</button>
-              <button class="sm" id="switchResetBtn">Switch all on</button></span>
+              <button class="sm" id="switchResetBtn">Switch all on</button>
+              <button class="sm" id="pricesBtn">↻ Refresh prices</button></span>
           </div>
+          <div class="hint" id="pricesInfo" style="margin-top:8px"></div>
           <div class="hint"><b>Click a model to switch it off</b>, or a vendor button to disable
             the lot — then send a query and watch where traffic goes instead. Health is separate
             and automatic: a circuit breaker opens after <b id="thresholdN">3</b> consecutive
@@ -1127,6 +1182,21 @@ function renderQuality(q) {
     ${CHECK_ICON[c.level]}</span><div><b>${esc(c.title)}</b>${c.detail?`<br><span>${esc(c.detail)}</span>`:""}</div></div>`).join("");
 }
 
+/* The headline split, right under the pipeline: what the gateway itself cost
+   vs what the model cost. The gateway number is the one that recurs on every
+   agent call — it has to stay microscopic, and it has to be *visible* to be
+   held to that. */
+function renderTimeSplit(t) {
+  const gw = Math.max(0, (t.gateway_overhead_ms || 0) - (t.pilot_wait_ms || 0));
+  const el = $("timeSplit");
+  el.style.display = "";
+  el.innerHTML = `this request: <b>gateway ${ms(gw)}</b> · llm ${ms(t.upstream_ms)}`
+    + (t.pilot_wait_ms ? ` · pilot wait ${ms(t.pilot_wait_ms)}` : "")
+    + ` · total ${ms(t.total_ms)}`
+    + ` <span style="color:var(--text-muted)">(gateway = ${
+        t.total_ms ? (gw / t.total_ms * 100).toFixed(2) : "0"}% of the trip)</span>`;
+}
+
 /* ---- hops ---- */
 const HOP_KIND = { origin:{i:"◉",c:"origin"}, classifier:{i:"◍",c:""}, model:{i:"▶",c:""},
   cache_wait:{i:"⏸",c:"wait"}, probe:{i:"◌",c:""} };
@@ -1369,7 +1439,7 @@ function handleStage(ev) {
           + (ev.fallback_chain.length?`<br>fallback: ${esc(ev.fallback_chain.join(" → "))}`:"") });
       break;
     case "quality": renderQuality(ev); break;
-    case "hops": renderHops(ev); break;
+    case "hops": renderHops(ev); renderTimeSplit(ev); break;
     case "done": render(ev.response); break;
     case "error":
       if (ev.user_message) {
@@ -1414,21 +1484,179 @@ $("resetBtn").onclick = async () => {
   $("reason").textContent = "Session forgotten — the next request routes cold.";
 };
 
+/* ---- live worker lanes (shared by fan-out and fan-in) ------------------
+   One compact pipeline per worker, plus a unified feed that appends a line
+   per stage event across every worker, in the order things actually happened.
+   The events are the same ones tab 1's big pipeline renders — real stages
+   with real timings, just multiplexed. */
+const LANE_STAGES = ["accepted","canonicalised","classified","budget","routed","cache","quality","served"];
+
+function buildLanes(host, workers) {
+  host.innerHTML = `<div class="wt" style="margin:12px 0 4px">Live pipeline — one lane per worker</div>
+    <div class="lanes">` + workers.map(w => `
+      <div class="lane" data-w="${w.id}" title="${esc(w.title || "")}">
+        <span class="lw">${esc(w.label)}</span>
+        <span class="lstages">${LANE_STAGES.map(s =>
+          `<i class="lst" data-s="${s}" title="${s}"></i>`).join("")}</span>
+        <span class="lmeta">queued…</span>
+      </div>`).join("") + `</div>
+    <div class="ltotals">gateway Σ <b>0ms</b> · pilot wait Σ 0ms · LLM Σ 0ms</div>
+    <div class="livefeed"></div>`;
+  return {
+    lane: id => host.querySelector(`.lane[data-w="${id}"]`),
+    feed: host.querySelector(".livefeed"),
+    totalsEl: host.querySelector(".ltotals"),
+    totals: { calls: 0, gw: 0, wait: 0, llm: 0 },
+  };
+}
+
+/* Fold one finished call into the run's clock, and redraw the tally. The
+   cumulative gateway number is the point: per call it is microscopic next to
+   the model, but every agent call pays it, so only the running sum shows what
+   plugging the gateway into everything actually costs. */
+function laneTally(view, ev) {
+  const t = view.totals;
+  t.calls += 1;
+  t.gw += Math.max(0, (ev.gateway_overhead_ms || 0) - (ev.pilot_wait_ms || 0));
+  t.wait += ev.pilot_wait_ms || 0;
+  t.llm += ev.upstream_ms || 0;
+  view.totalsEl.innerHTML =
+    `gw Σ <b>${t.gw}ms</b> · ${(t.gw / t.calls).toFixed(1)}ms/call × ${t.calls}`
+    + (t.wait ? ` · wait Σ ${t.wait.toLocaleString()}ms` : "")
+    + ` · llm Σ ${(t.llm / 1000).toFixed(2)}s`;
+}
+
+function laneStage(view, ev) {
+  const lane = view.lane(ev.worker); if (!lane) return;
+  const dot = lane.querySelector(`.lst[data-s="${ev.stage}"]`);
+  if (dot) dot.classList.add("on");
+  const meta = lane.querySelector(".lmeta");
+  if (ev.stage === "accepted") meta.textContent = "running…";
+  else if (ev.stage === "routed") {
+    lane.dataset.model = ev.model;
+    meta.textContent = `${ev.model} · ${ev.tier} · est ${money(ev.estimated_cost_usd)}`;
+  } else if (ev.stage === "cache")
+    meta.textContent = `${lane.dataset.model || ""} · ${ev.pilot_role}`;
+  else if (ev.stage === "served") {
+    // The model is already known from `routed`; the close-out line spends its
+    // narrow column on what is new — the bill, the clock, and the cache.
+    lane.dataset.cost = money(ev.actual_cost_usd);
+    meta.textContent = `${lane.dataset.cost} · ${ev.latency_ms}ms`
+      + (ev.cache_read_tokens ? ` · read ${ev.cache_read_tokens.toLocaleString()}` : "");
+    lane.classList.add("done");
+  }
+  else if (ev.stage === "hops") {
+    // The split the whole lane is judged by: the model's time vs the
+    // gateway's own, with the pilot's deliberate wait broken out — a wait
+    // chosen to save money is not gateway weight.
+    // Timing only — the cost already showed at `served` and lives on in the
+    // summary; the narrow column goes to the split the run is judged by.
+    const gw = Math.max(0, (ev.gateway_overhead_ms || 0) - (ev.pilot_wait_ms || 0));
+    meta.textContent = `llm ${ev.upstream_ms}ms · gw ${gw}ms`
+      + (ev.pilot_wait_ms ? ` · wait ${ev.pilot_wait_ms}ms` : "");
+    laneTally(view, ev);
+  }
+}
+
+function laneDone(view, ev) {
+  const lane = view.lane(ev.worker); if (!lane) return;
+  if (ev.agent && ev.agent.error) {
+    lane.classList.add("err");
+    lane.querySelector(".lmeta").textContent = "failed";
+    lane.querySelectorAll(".lst:not(.on)").forEach(d => d.classList.add("err"));
+  }
+}
+
+function feedDetail(ev) {
+  switch (ev.stage) {
+    case "accepted":      return `tenant ${ev.tenant}`;
+    case "canonicalised": return `prefix ${(ev.prefix_tokens||0).toLocaleString()} tok · ${ev.tools ?? 0} tools`;
+    case "classified":    return `${ev.intent} (${ev.source}${ev.confidence != null ? `, ${Math.round(ev.confidence*100)}%` : ""})`;
+    case "budgeted":      return `max_tokens ${(ev.max_tokens||0).toLocaleString()} — sized to intent`;
+    case "budget":        return `spent ${money(ev.spend_usd||0)} of $${ev.limit_usd}${ev.degraded ? " · DEGRADED" : ""}`;
+    case "routed":        return `${ev.model} · ${ev.tier} · est ${money(ev.estimated_cost_usd)}`;
+    case "cache":         return `${ev.state} · ${ev.pilot_role}`;
+    case "effort":        return ev.extra_effort != null ? `extra effort ${ev.extra_effort}` : "";
+    case "quality":       return ev.verdict || "";
+    case "served":        return `${money(ev.actual_cost_usd)} · ${ev.latency_ms}ms · read ${(ev.cache_read_tokens||0).toLocaleString()} · wrote ${(ev.cache_write_tokens||0).toLocaleString()}`;
+    case "hops":          return `llm ${ev.upstream_ms}ms · gateway ${Math.max(0,(ev.gateway_overhead_ms||0)-(ev.pilot_wait_ms||0))}ms`
+                               + (ev.pilot_wait_ms ? ` · pilot wait ${ev.pilot_wait_ms}ms` : "")
+                               + ` · ${ev.hop_count} hops`;
+    default:              return "";
+  }
+}
+
+function feedLine(view, ev) {
+  let html;
+  const t = `+${((ev.at_ms||0)/1000).toFixed(2)}s`.padStart(8);
+  const w = String(ev.worker === "synth" ? "SYN" : "W" + ev.worker).padEnd(5);
+  if (ev.event === "worker_done") {
+    if (!ev.agent || !ev.agent.error) return; // a clean finish already showed as `served`
+    html = `<span class="ft">${t}</span> <span class="fw">${w}</span>`
+      + `<span class="ferr">✗ ${esc(String(ev.agent.error)).slice(0, 200)}</span>`;
+  } else if (ev.event === "error") {
+    html = `<span class="ferr">✗ ${esc(ev.error)}</span>`;
+  } else {
+    html = `<span class="ft">${t}</span> <span class="fw">${w}</span>`
+      + `<span class="fs">${ev.stage.padEnd(14)}</span><span class="fd">${esc(feedDetail(ev))}</span>`;
+  }
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  view.feed.appendChild(div);
+  view.feed.scrollTop = view.feed.scrollHeight;
+}
+
+async function consumeLive(res, onEv) {
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read(); if (done) return;
+    buf += dec.decode(value, { stream: true });
+    const frames = buf.split("\n\n"); buf = frames.pop();
+    for (const f of frames) {
+      const line = f.split("\n").find(l => l.startsWith("data: ")); if (!line) continue;
+      const raw = line.slice(6); if (raw === "[DONE]") return;
+      onEv(JSON.parse(raw));
+    }
+  }
+}
+
 /* ---- fan-out ---- */
 $("fanBtn").onclick = async () => {
   const btn = $("fanBtn"); btn.disabled = true; btn.textContent = "Running…";
-  $("fanResult").innerHTML = '<div class="hint">Firing sub-agents…</div>';
+  const n = Math.max(1, Math.min(12, parseInt($("agents").value)||4));
+  const subtasks = $("fanTasks").value.split("\n").map(s => s.trim()).filter(Boolean);
+  const view = buildLanes($("fanLive"), Array.from({ length: n }, (_, i) =>
+    ({ id: i + 1, label: "W" + (i + 1),
+       title: subtasks.length ? subtasks[i % subtasks.length] : "" })));
+  $("fanResult").innerHTML = "";
+  let summary = null;
   try {
-    const res = await fetch("/demo/fanout", {
+    const res = await fetch("/demo/fanout/live", {
       method:"POST", headers:{ "content-type":"application/json", "x-tenant-id":"demo" },
       body: JSON.stringify({ prompt:$("prompt").value, shared_context:$("fanCtx").value,
-        agents: Math.max(1, Math.min(12, parseInt($("agents").value)||4)),
-        subtasks: $("fanTasks").value.split("\n").map(s => s.trim()).filter(Boolean),
+        agents: n,
+        subtasks,
         session_id:($("session").value||"demo-1")+"-fanout",
         max_tokens: parseInt($("maxTokens").value) || 4000,
         pilot_enabled: $("pilotOn").value === "true" }) });
-    const d = await res.json();
-    if (!res.ok) throw new Error(d?.error?.message || "fan-out failed");
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d?.error?.message || `HTTP ${res.status}`);
+    }
+    await consumeLive(res, ev => {
+      if (ev.event === "stage") { laneStage(view, ev); feedLine(view, ev); }
+      else if (ev.event === "worker_done") { laneDone(view, ev); feedLine(view, ev); }
+      else if (ev.event === "summary") summary = ev;
+      else if (ev.event === "error") feedLine(view, ev);
+    });
+    if (!summary) throw new Error("run ended without a summary");
+    renderFanout(summary);
+  } catch (e) { $("fanResult").innerHTML = `<div class="reason err">✗ ${esc(e.message)}</div>`; }
+  finally { btn.disabled = false; btn.textContent = "Run fan-out"; refreshFleet(); }
+};
+
+function renderFanout(d) {
     const readers = d.agents.filter(a => a.cache_read_tokens > 0).length;
     const bad = d.agents.filter(a => a.quality && a.quality !== "pass").length;
     // The single most common cause of "caching isn't working": there was
@@ -1460,12 +1688,18 @@ $("fanBtn").onclick = async () => {
            agent on one model and share a single cache.</div></div>`
       : "";
 
+    const ts = d.time_split || {};
     $("fanResult").innerHTML = cacheNote + splitNote + `<div class="tiles" style="margin-bottom:10px">
       <div class="tile"><div class="k">Total cost</div><div class="v">${money(d.total_cost_usd)}</div></div>
       <div class="tile"><div class="k">Cache reads</div><div class="v">${readers}/${d.agents.length}</div></div>
       <div class="tile"><div class="k">Failed quality</div><div class="v">${bad}/${d.agents.length}</div></div>
       <div class="tile"><div class="k">Wall clock</div><div class="v">${d.wall_clock_ms}<small> ms</small></div></div>
+      <div class="tile" title="The gateway's own compute across every call in this run — the number that recurs on every agent call. Pilot wait is excluded: that is a deliberate trade to share a cache, not gateway weight.">
+        <div class="k">Gateway Σ</div><div class="v">${ts.gateway_ms_total ?? 0}<small> ms · ${ts.gateway_ms_mean ?? 0}/call</small></div></div>
+      <div class="tile"><div class="k">LLM Σ</div><div class="v">${((ts.llm_ms_total||0)/1000).toFixed(2)}<small> s</small></div></div>
       </div>
+      ${ts.pilot_wait_ms_total ? `<div class="hint" style="margin:0 0 8px">Plus ${ts.pilot_wait_ms_total.toLocaleString()}ms
+        of deliberate cache-pilot waiting across followers — time spent to turn N cold writes into one.</div>` : ""}
       <div class="wt" style="margin:14px 0 7px">What each agent came back with</div>
       ${d.agents.map(a => a.error
         ? `<div class="reason err" style="margin-bottom:8px"><b>Agent ${a.agent}</b>
@@ -1475,7 +1709,8 @@ $("fanBtn").onclick = async () => {
              <div style="color:var(--text-primary);font-size:13px;margin-bottom:6px">
                <b>Agent ${a.agent}</b> · ${esc(a.model)} ·
                ${a.pilot_role==="pilot"?"✎ pilot":a.cache_read_tokens?"✓ reader":"○ cold"} ·
-               ${money(a.cost_usd)} · ${a.latency_ms}ms ·
+               ${money(a.cost_usd)} · llm ${a.upstream_ms ?? "—"}ms ·
+               gw ${Math.max(0,(a.gateway_ms||0)-(a.pilot_wait_ms||0))}ms ·
                <span style="color:var(--${a.quality==="pass"?"success-text":a.quality==="fail"?"critical":"warning"})">
                  ${a.quality==="pass"?"✓":a.quality==="fail"?"✗":"!"} ${a.quality || "—"}</span>
              </div>
@@ -1492,22 +1727,45 @@ $("fanBtn").onclick = async () => {
         ${d.total_cache_read_tokens.toLocaleString()} tok · written
         ${d.total_cache_write_tokens.toLocaleString()} tok. On OpenAI there is no separate
         write step — caching is automatic, so writes stay 0 and only reads appear.</div>`;
-  } catch (e) { $("fanResult").innerHTML = `<div class="reason err">✗ ${esc(e.message)}</div>`; }
-  finally { btn.disabled = false; btn.textContent = "Run fan-out"; refreshFleet(); }
-};
+}
 
 /* ---- fan-in ---- */
 $("fiBtn").onclick = async () => {
   const btn = $("fiBtn"); btn.disabled = true; btn.textContent = "Scattering…";
-  $("fiResult").innerHTML = '<div class="hint">Workers running in parallel…</div>';
+  const subtasks = $("fiSubs").value.split("\n").map(s => s.trim()).filter(Boolean);
+  const view = buildLanes($("fiLive"),
+    subtasks.map((s, i) => ({ id: i + 1, label: "W" + (i + 1), title: s }))
+      .concat([{ id: "synth", label: "SYN",
+                 title: "synthesiser — starts once every worker has answered" }]));
+  view.lane("synth").querySelector(".lmeta").textContent = "waiting for workers…";
+  $("fiResult").innerHTML = "";
+  let summary = null;
   try {
-    const subtasks = $("fiSubs").value.split("\n").map(s => s.trim()).filter(Boolean);
-    const res = await fetch("/demo/fanin", {
+    const res = await fetch("/demo/fanin/live", {
       method:"POST", headers:{ "content-type":"application/json", "x-tenant-id":"demo" },
       body: JSON.stringify({ task:$("fiTask").value, subtasks, shared_context:$("fiCtx").value,
         session_id:($("session").value||"demo-1")+"-fanin", max_tokens:4000 }) });
-    const d = await res.json();
-    if (!res.ok) throw new Error(d?.error?.message || "fan-in failed");
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d?.error?.message || `HTTP ${res.status}`);
+    }
+    let liveError = null;
+    await consumeLive(res, ev => {
+      if (ev.event === "stage") {
+        if (ev.worker === "synth") btn.textContent = "Synthesising…";
+        laneStage(view, ev); feedLine(view, ev);
+      }
+      else if (ev.event === "worker_done") { laneDone(view, ev); feedLine(view, ev); }
+      else if (ev.event === "summary") summary = ev;
+      else if (ev.event === "error") { liveError = ev.error; feedLine(view, ev); }
+    });
+    if (!summary) throw new Error(liveError || "run ended without a summary");
+    renderFanin(summary);
+  } catch (e) { $("fiResult").innerHTML = `<div class="reason err">✗ ${esc(e.message)}</div>`; }
+  finally { btn.disabled = false; btn.textContent = "Run fan-in"; refreshFleet(); refreshReputation(); }
+};
+
+function renderFanin(d) {
     const t = d.totals, s = d.synthesis;
     $("fiResult").innerHTML = `<div class="tiles" style="margin-bottom:10px">
       <div class="tile"><div class="k">Workers</div><div class="v">${money(t.worker_cost_usd)}</div></div>
@@ -1522,23 +1780,28 @@ $("fiBtn").onclick = async () => {
            <div><b>No tier split this run.</b> Every leg landed on the same tier — try subtasks
            of clearly different difficulty.</div></div>`}
       <div class="scroll"><table><thead><tr><th>Leg</th><th>Intent</th><th>Model</th><th>Tier</th>
-      <th class="num">Cost</th><th class="num">ms</th></tr></thead><tbody>
+      <th class="num">Cost</th><th class="num">llm ms</th><th class="num">gw ms</th></tr></thead><tbody>
       ${d.workers.map(w => w.error
-        ? `<tr><td>W${w.worker}</td><td colspan="5" style="color:var(--critical)">${esc(w.error)}</td></tr>`
+        ? `<tr><td>W${w.worker}</td><td colspan="6" style="color:var(--critical)">${esc(w.error)}</td></tr>`
         : `<tr><td>W${w.worker}</td><td>${esc(w.intent)}</td><td>${esc(w.model)}</td>
            <td><span class="tier-swatch ${TIERS[w.tier]}"></span> ${w.tier}</td>
-           <td class="num">${money(w.cost_usd)}</td><td class="num">${w.latency_ms}</td></tr>`).join("")}
+           <td class="num">${money(w.cost_usd)}</td><td class="num">${w.upstream_ms ?? w.latency_ms}</td>
+           <td class="num">${Math.max(0,(w.gateway_ms||0)-(w.pilot_wait_ms||0))}</td></tr>`).join("")}
       <tr style="border-top:2px solid var(--baseline)"><td><b>Synth</b></td><td>${esc(s.intent)}</td>
         <td><b>${esc(s.model)}</b></td><td><span class="tier-swatch ${TIERS[s.tier]}"></span> ${s.tier}</td>
-        <td class="num">${money(s.cost_usd)}</td><td class="num">${s.latency_ms}</td></tr>
+        <td class="num">${money(s.cost_usd)}</td><td class="num">${s.upstream_ms ?? s.latency_ms}</td>
+        <td class="num">${Math.max(0,(s.gateway_ms||0)-(s.pilot_wait_ms||0))}</td></tr>
       </tbody></table></div>
       <div class="wt" style="margin:12px 0 5px">Synthesised answer</div>
       <div class="answer">${esc(s.answer || "(empty)")}</div>
       <div class="hint">scatter ${t.scatter_ms}ms (parallel) + gather ${t.gather_ms}ms. Each leg was
-        routed independently — see the Fleet tab for where they landed.</div>`;
-  } catch (e) { $("fiResult").innerHTML = `<div class="reason err">✗ ${esc(e.message)}</div>`; }
-  finally { btn.disabled = false; btn.textContent = "Run fan-in"; refreshFleet(); refreshReputation(); }
-};
+        routed independently — see the Fleet tab for where they landed.</div>
+      ${t.time_split ? `<div class="hint">Gateway Σ <b>${t.time_split.gateway_ms_total}ms</b> across
+        ${t.time_split.calls} legs (${t.time_split.gateway_ms_mean}ms/call) vs
+        LLM Σ ${(t.time_split.llm_ms_total/1000).toFixed(2)}s — the gateway's whole bill for
+        orchestrating this run${t.time_split.pilot_wait_ms_total
+          ? `, plus ${t.time_split.pilot_wait_ms_total.toLocaleString()}ms of deliberate pilot wait` : ""}.</div>` : ""}`;
+}
 
 /* ---- credentials ---- */
 async function refreshHealth() {
@@ -1557,7 +1820,9 @@ async function refreshCreds() {
       gap:8px;padding:6px 0;border-bottom:1px solid var(--grid);font-size:13px">
       <span class="dot ${p.configured?"on":"off"}"></span><b style="min-width:76px">${p.provider}</b>
       <span style="color:var(--text-secondary);font-family:var(--mono);font-size:12px">
-      ${p.configured ? esc(p.masked_key)+" · "+p.source : "not configured"}</span>
+      ${p.configured ? esc(p.masked_key)+" · "+p.source
+        +(p.kind==="oauth_token"?" · subscription":p.kind==="ambient"?"":" · api key")
+        : "not configured"}</span>
       ${p.configured && d.editable ? `<button class="sm" data-clear="${p.provider}"
         style="margin-left:auto">remove</button>` : ""}</div>`).join("");
     $("credStatus").querySelectorAll("[data-clear]").forEach(b => b.onclick = async () => {
@@ -1647,6 +1912,47 @@ function renderPool(chosen) {
 $("probeBtn").onclick = async () => { await fetch("/admin/pool/probe",{method:"POST"}); await refreshPool(lastChosen); };
 $("breakerBtn").onclick = async () => { await fetch("/admin/pool/reset",{method:"POST"}); await refreshPool(lastChosen); };
 $("switchResetBtn").onclick = async () => { await fetch("/admin/switchboard/reset",{method:"POST"}); await refreshPool(lastChosen); };
+
+/* ---- live pricing ----
+   The router selects on these numbers, so a stale rate re-routes whole tiers.
+   The daily feed pull keeps them current; the button answers "did the vendor
+   reprice" right now. Every change is listed — a silent repricing would be a
+   silent rerouting. */
+async function refreshPricesInfo() {
+  try {
+    const d = await (await fetch("/admin/prices")).json();
+    const lr = d.last_refresh;
+    $("pricesInfo").innerHTML = lr
+      ? `Prices last pulled <b>${new Date(lr.at*1000).toLocaleString()}</b> — `
+        + `${lr.updated} repriced, ${lr.confirmed} confirmed, ${lr.missing} not in feed`
+        + (lr.suspicious ? `, <span style="color:var(--warning)">${lr.suspicious} suspicious (not applied)</span>` : "")
+        + (d.refresh_hours > 0 ? ` · auto-refreshes every ${d.refresh_hours}h.` : ".")
+      : `Catalog rates are hand-verified. ${d.refresh_hours > 0
+          ? `A feed pull runs every ${d.refresh_hours}h`
+          : "The daily pull is disabled"} — <b>↻ Refresh prices</b> pulls now.`;
+  } catch { /* pricing info is a nicety; the pool still renders without it */ }
+}
+$("pricesBtn").onclick = async () => {
+  const b = $("pricesBtn"); b.disabled = true; b.textContent = "Pulling…";
+  try {
+    const res = await fetch("/admin/prices/refresh", { method:"POST" });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d?.error?.message || `HTTP ${res.status}`);
+    $("pricesInfo").innerHTML =
+      `<b>${d.updated.length} repriced</b>, ${d.confirmed.length} confirmed at current rates, `
+      + `${d.missing.length} not in the feed`
+      + (d.suspicious.length ? `, <span style="color:var(--warning)">${d.suspicious.length} suspicious — skipped, check the feed</span>` : "")
+      + (d.updated.length
+          ? "<br>" + d.updated.map(u =>
+              `${esc(u.model)}: $${u.from[0]}/$${u.from[1]} → <b>$${u.to[0]}/$${u.to[1]}</b> per MTok`
+            ).join("<br>")
+            + "<br><i>The router is already selecting on the new rates.</i>"
+          : "");
+    await refreshPool(lastChosen);
+  } catch (e) {
+    $("pricesInfo").innerHTML = `<span style="color:var(--critical)">✗ ${esc(e.message)}</span>`;
+  } finally { b.disabled = false; b.textContent = "↻ Refresh prices"; }
+};
 
 /* ---- reputation ---- */
 async function refreshReputation() {
@@ -1852,7 +2158,7 @@ $("alertAck").onclick = async () => {
 
 async function boot() {
   seedFanout();
-  await refreshHealth(); await refreshCreds(); await refreshPool();
+  await refreshHealth(); await refreshCreds(); await refreshPool(); await refreshPricesInfo();
   await refreshFleet(); await refreshReputation(); await refreshBaselines();
   await refreshAlerts();
   // Poll, so the flag appears without anyone having to send a request.

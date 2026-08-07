@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moon — Database</title>
+<style>
+/* Same tokens as the analytics and transactions pages — one system. */
+:root{
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e;
+  --muted:#898781; --grid:#e1e0d9; --border:rgba(11,11,11,.10);
+  --s1:#2a78d6; --goodtext:#006300; --warn:#fab219; --crit:#d03b3b;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --border:rgba(255,255,255,.10);
+    --s1:#3987e5; --goodtext:#0ca30c;
+  }
+}
+:root[data-theme="dark"]{
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7;
+  --muted:#898781; --grid:#2c2c2a; --border:rgba(255,255,255,.10);
+  --s1:#3987e5; --goodtext:#0ca30c;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);
+  font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:var(--s1);text-decoration:none}
+code,.mono,textarea{font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
+header{padding:14px 20px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+h1{font-size:17px;margin:0;font-weight:650}
+h1 span{color:var(--muted);font-weight:450}
+.spacer{flex:1}
+button.ghost,a.ghost{border:1px solid var(--border);background:var(--surface);color:var(--ink2);
+  border-radius:8px;padding:5px 11px;cursor:pointer;font:inherit;font-size:13px;display:inline-block}
+button.primary{border:1px solid var(--s1);background:var(--s1);color:#fff;
+  border-radius:8px;padding:6px 14px;cursor:pointer;font:inherit;font-size:13px;font-weight:550}
+button:disabled{opacity:.5;cursor:not-allowed}
+.wrap{max-width:1360px;margin:0 auto;padding:16px 20px 40px;
+  display:grid;grid-template-columns:280px 1fr;gap:16px;align-items:start}
+@media(max-width:900px){.wrap{grid-template-columns:1fr}}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:14px 16px;min-width:0}
+.card h2{font-size:13.5px;margin:0 0 8px;font-weight:650}
+.note{color:var(--muted);font-size:12px;margin:6px 0}
+.cols{font-size:12px;color:var(--ink2);max-height:340px;overflow:auto}
+.cols div{display:flex;justify-content:space-between;padding:2px 0;
+  border-bottom:1px solid var(--grid)}
+.cols div:last-child{border-bottom:0}
+.cols .t{color:var(--muted);font-size:11px}
+.canned{display:flex;flex-direction:column;gap:5px;margin-top:6px}
+.canned button{text-align:left;border:1px solid var(--border);background:var(--page);
+  color:var(--ink2);border-radius:7px;padding:6px 9px;cursor:pointer;font-size:12px}
+.canned button:hover{color:var(--ink);border-color:var(--muted)}
+textarea{width:100%;min-height:110px;resize:vertical;background:var(--page);
+  color:var(--ink);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.runrow{display:flex;gap:10px;align-items:center;margin-top:10px}
+.scroll{overflow-x:auto;margin-top:12px;border:1px solid var(--border);border-radius:8px}
+table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+th{color:var(--muted);font-weight:500;text-align:left;padding:6px 9px;
+  border-bottom:1px solid var(--grid);font-size:11px;white-space:nowrap;
+  position:sticky;top:0;background:var(--surface)}
+td{padding:5px 9px;border-bottom:1px solid var(--grid);white-space:nowrap;
+  max-width:420px;overflow:hidden;text-overflow:ellipsis;
+  font-family:ui-monospace,Menlo,monospace}
+tr:last-child td{border-bottom:0}
+.err{color:var(--crit);background:var(--surface);border:1px solid var(--border);
+  border-left:3px solid var(--crit);border-radius:8px;padding:9px 12px;
+  font-size:12.5px;margin-top:12px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<header>
+  <h1>Moon <span>— Database</span></h1>
+  <span class="note" id="meta" style="margin:0"></span>
+  <div class="spacer"></div>
+  <button class="ghost" id="themeBtn">◐ Theme</button>
+  <a href="/analytics" class="ghost">Analytics →</a>
+  <a href="/transactions" class="ghost">Transactions →</a>
+  <a href="/" class="ghost">Console →</a>
+</header>
+
+<div class="wrap">
+  <div>
+    <div class="card">
+      <h2>Schema</h2>
+      <div id="schema" class="note">loading…</div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h2>Questions worth asking</h2>
+      <div class="canned" id="canned"></div>
+      <div class="note">Read-only: SELECT / WITH / EXPLAIN. The file itself is at
+        <code id="dbpath"></code> — open it with <code>sqlite3</code> or DuckDB's
+        <code>sqlite_scan</code> for anything heavier.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Query</h2>
+    <textarea id="sql" spellcheck="false">SELECT chosen_model,
+       COUNT(*)                        AS requests,
+       ROUND(SUM(actual_cost_usd), 4) AS spend_usd,
+       SUM(cache_read_tokens)         AS cached_tokens
+FROM records
+GROUP BY chosen_model
+ORDER BY spend_usd DESC</textarea>
+    <div class="runrow">
+      <button class="primary" id="runBtn">Run (⌘⏎)</button>
+      <span class="note" id="stat" style="margin:0"></span>
+    </div>
+    <div id="out"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+
+const savedTheme = localStorage.getItem("moon-theme");
+if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+$("themeBtn").onclick = () => {
+  const cur = document.documentElement.dataset.theme ||
+    (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem("moon-theme", next);
+};
+
+/* Each of these answers a question the gateway's design says to keep asking. */
+const CANNED = [
+  ["Spend & cache by model", `SELECT chosen_model,
+       COUNT(*)                        AS requests,
+       ROUND(SUM(actual_cost_usd), 4) AS spend_usd,
+       ROUND(SUM(cache_savings_usd), 4) AS saved_usd,
+       SUM(cache_read_tokens)         AS cached_tokens
+FROM records GROUP BY 1 ORDER BY spend_usd DESC`],
+  ["Slowest requests (llm vs gateway)", `SELECT datetime(timestamp,'unixepoch','localtime') AS at,
+       chosen_model, upstream_ms, gateway_overhead_ms, latency_total_ms, outcome
+FROM records ORDER BY latency_total_ms DESC LIMIT 25`],
+  ["Estimate drift by model", `SELECT chosen_model,
+       COUNT(*) AS n,
+       ROUND(AVG(estimate_error), 3) AS drift_mean,
+       ROUND(MAX(ABS(estimate_error)), 3) AS drift_worst
+FROM records WHERE outcome='ok' AND actual_cost_usd > 0
+GROUP BY 1 ORDER BY ABS(drift_mean) DESC`],
+  ["Routing misses by (model, intent)", `SELECT chosen_model, resolved_intent,
+       COUNT(*) AS requests, SUM(routing_ok = 0) AS misses
+FROM records WHERE outcome='ok'
+GROUP BY 1, 2 HAVING misses > 0 ORDER BY misses DESC`],
+  ["Spend per day", `SELECT date(timestamp,'unixepoch','localtime') AS day,
+       COUNT(*) AS requests,
+       ROUND(SUM(actual_cost_usd), 4) AS spend_usd,
+       SUM(prompt_tokens + completion_tokens) AS tokens
+FROM records GROUP BY 1 ORDER BY 1 DESC`],
+  ["Pilot outcomes", `SELECT pilot_role, COUNT(*) AS requests,
+       SUM(cache_read_tokens) AS cached_tokens
+FROM records WHERE pilot_role != '' GROUP BY 1 ORDER BY 2 DESC`],
+  ["Failures, most recent first", `SELECT datetime(timestamp,'unixepoch','localtime') AS at,
+       outcome, chosen_model, substr(error, 1, 120) AS error
+FROM records WHERE outcome != 'ok' ORDER BY timestamp DESC LIMIT 25`],
+];
+
+$("canned").innerHTML = CANNED.map(([label], i) =>
+  `<button data-i="${i}">${esc(label)}</button>`).join("");
+$("canned").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  $("sql").value = CANNED[+b.dataset.i][1];
+  run();
+});
+
+async function loadSchema() {
+  try {
+    const d = await (await fetch("/admin/db/schema")).json();
+    $("dbpath").textContent = d.db_path;
+    $("meta").textContent = Object.entries(d.tables)
+      .map(([t, s]) => `${t}: ${s.rows.toLocaleString()} rows`).join(" · ");
+    $("schema").innerHTML = Object.entries(d.tables).map(([t, s]) => `
+      <div style="border:none;display:block;padding:0">
+        <b>${esc(t)}</b> <span class="t">${s.rows.toLocaleString()} rows</span>
+        <div class="cols" style="margin-top:4px">
+          ${s.columns.map(c => `<div><span>${esc(c.name)}</span>
+            <span class="t">${esc(c.type)}</span></div>`).join("")}
+        </div>
+      </div>`).join("");
+  } catch { $("schema").textContent = "schema unavailable"; }
+}
+
+async function run() {
+  const btn = $("runBtn"); btn.disabled = true;
+  $("stat").textContent = "running…";
+  const started = performance.now();
+  try {
+    const res = await fetch("/admin/db/query", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sql: $("sql").value, limit: 500 }),
+    });
+    const d = await res.json();
+    if (!res.ok || d.error) {
+      $("out").innerHTML = `<div class="err">${esc(d.error || d?.detail?.error?.message || "query failed")}</div>`;
+      $("stat").textContent = "";
+      return;
+    }
+    $("stat").textContent = `${d.row_count.toLocaleString()} row${d.row_count === 1 ? "" : "s"}`
+      + (d.truncated ? " (truncated at 500 — add a LIMIT or aggregate)" : "")
+      + ` · ${Math.round(performance.now() - started)}ms`;
+    if (!d.rows.length) {
+      $("out").innerHTML = '<div class="note" style="margin-top:12px">No rows.</div>';
+      return;
+    }
+    $("out").innerHTML = `<div class="scroll"><table>
+      <thead><tr>${d.columns.map(c => `<th>${esc(c)}</th>`).join("")}</tr></thead>
+      <tbody>${d.rows.map(r =>
+        `<tr>${r.map(v => `<td title="${esc(v)}">${esc(v)}</td>`).join("")}</tr>`).join("")}
+      </tbody></table></div>`;
+  } catch (e) {
+    $("out").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+    $("stat").textContent = "";
+  } finally { btn.disabled = false; }
+}
+
+$("runBtn").onclick = run;
+$("sql").addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
+});
+
+loadSchema();
+run();
+</script>
+</body>
+</html>

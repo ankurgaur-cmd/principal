@@ -9,7 +9,7 @@ varies is *policy*, not workload. That makes the comparison honest: the
 counterfactual cost of routing everything to the frontier model, or of turning
 off cache-aware routing, is computed against the traffic you actually served.
 
-    python -m aigateway.replay.harness var/records.jsonl
+    python -m aigateway.replay.harness var/records.db
 
 Caveat worth stating plainly: replay assumes output length is independent of
 the model chosen. It usually is not — a weaker model may need more turns to
@@ -215,13 +215,26 @@ def _format(results: list[Result]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Replay recorded traffic against routing policies")
-    parser.add_argument("records", help="path to records.jsonl")
+    parser.add_argument("records", help="path to records.db (SQLite) or records.jsonl")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     args = parser.parse_args(argv)
 
     try:
-        with open(args.records, encoding="utf-8") as fh:
-            records = [json.loads(line) for line in fh if line.strip()]
+        if args.records.endswith(".jsonl"):
+            with open(args.records, encoding="utf-8") as fh:
+                records = [json.loads(line) for line in fh if line.strip()]
+        else:
+            import os
+
+            if not os.path.exists(args.records):
+                raise FileNotFoundError(args.records)
+            from ..observability.db import SqliteRecordSink
+
+            sink = SqliteRecordSink(args.records)
+            try:
+                records = sink.read_all()
+            finally:
+                sink.close()
     except FileNotFoundError:
         print(f"no records at {args.records} — send some traffic first", file=sys.stderr)
         return 1

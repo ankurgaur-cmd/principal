@@ -38,12 +38,19 @@ _STREAM_THRESHOLD = 16_000
 class AnthropicProvider:
     name = "anthropic"
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(self, api_key: str | None = None, auth_token: str | None = None):
         import anthropic
 
-        self._client = anthropic.AsyncAnthropic(api_key=api_key) if api_key else (
-            anthropic.AsyncAnthropic()
-        )
+        # Two credential shapes, deliberately distinct: an API key from the
+        # console, or an OAuth token minted against a Claude subscription
+        # (``claude setup-token`` → ``sk-ant-oat…``). The SDK treats them
+        # differently on the wire, so conflating them produces confusing 401s.
+        if auth_token:
+            self._client = anthropic.AsyncAnthropic(auth_token=auth_token)
+        elif api_key:
+            self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        else:
+            self._client = anthropic.AsyncAnthropic()
 
     @property
     def host(self) -> str:

@@ -26,7 +26,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from ..errors import GatewayError
-from ..providers.registry import BUILDERS, mask
+from ..providers.registry import BUILDERS, CREDENTIAL_KINDS, mask
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/credentials", tags=["credentials"])
@@ -35,6 +35,12 @@ router = APIRouter(prefix="/admin/credentials", tags=["credentials"])
 class CredentialUpdate(BaseModel):
     provider: str = Field(..., description="anthropic | openai")
     api_key: str = Field("", description="Omit when use_ambient is true.")
+    kind: str = Field(
+        "auto",
+        description="auto | api_key | oauth_token. 'auto' detects a "
+        "subscription OAuth token by its sk-ant-oat prefix; anything else is "
+        "treated as an API key.",
+    )
     persist: bool = Field(
         False,
         description="Also write to .env so the key survives a restart. Off by "
@@ -87,13 +93,29 @@ async def set_credentials(body: CredentialUpdate, request: Request) -> dict:
     if not body.use_ambient and len(api_key) < 8:
         raise GatewayError(422, "api_key is required unless use_ambient is set", code="no_key")
 
+    # Detect the credential shape rather than making the user know the
+    # taxonomy: subscription OAuth tokens carry a distinctive prefix.
+    kind = body.kind
+    if kind == "auto":
+        kind = "oauth_token" if api_key.startswith("sk-ant-oat") else "api_key"
+    if kind not in CREDENTIAL_KINDS.get(provider, ()):
+        raise GatewayError(
+            422,
+            f"{provider} does not accept {kind.replace('_', ' ')}s — a ChatGPT "
+            f"subscription is not API access; create an API key at "
+            f"platform.openai.com instead"
+            if provider == "openai"
+            else f"{provider} does not accept '{kind}' credentials",
+            code="unsupported_credential_kind",
+        )
+
     # Swap first, then validate through the real client — so what we test is
     # exactly what will serve traffic, not a separate throwaway client.
     previous_ok = provider in registry.enabled
     if body.use_ambient:
         registry.use_ambient(provider)
     else:
-        registry.set_credentials(provider, api_key, source="console")
+        registry.set_credentials(provider, api_key, source="console", kind=kind)
 
     ok, detail = await registry.get(provider).validate()
     if not ok:
@@ -104,11 +126,12 @@ async def set_credentials(body: CredentialUpdate, request: Request) -> dict:
 
     persisted = False
     if body.persist and not body.use_ambient:
-        persisted = _persist_to_env(provider, api_key)
+        persisted = _persist_to_env(provider, api_key, kind)
 
     return {
         "provider": provider,
         "configured": True,
+        "kind": "ambient" if body.use_ambient else kind,
         "masked_key": "(ambient)" if body.use_ambient else mask(api_key),
         "validated": detail,
         "persisted_to_env": persisted,
@@ -123,15 +146,18 @@ async def clear(provider: str, request: Request) -> dict:
 
 
 ENV_VAR = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+# A subscription token is a different credential and gets its own variable —
+# writing it into the API-key slot would make the SDK send it the wrong way.
+ENV_VAR_OAUTH = {"anthropic": "ANTHROPIC_AUTH_TOKEN"}
 
 
-def _persist_to_env(provider: str, api_key: str) -> bool:
+def _persist_to_env(provider: str, api_key: str, kind: str = "api_key") -> bool:
     """Upsert the key into ./.env (which .gitignore already excludes).
 
     Opt-in only. Returns False rather than raising if the file cannot be
     written — failing to persist must not fail an otherwise-valid key.
     """
-    var = ENV_VAR[provider]
+    var = (ENV_VAR_OAUTH if kind == "oauth_token" else ENV_VAR)[provider]
     path = Path(".env")
     try:
         lines = path.read_text().splitlines() if path.exists() else []
