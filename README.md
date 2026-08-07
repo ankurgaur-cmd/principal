@@ -4,6 +4,14 @@ A vendor-agnostic gateway for multi-agent systems. It picks the cheapest model
 that can actually do the job, and it does that **without throwing away your
 prompt cache** — which is the part naive routers get wrong.
 
+> **The routing brain is also available as a zero-dependency library:**
+> [moonrouter](https://github.com/ankurgaur-cmd/moonrouter) — decide-only, no
+> LLM calls, no server, embeds directly in agent code. Use the library when one
+> orchestrator process wants the routing intelligence in-process; use this
+> gateway when you need enforcement (budgets, rate limits, keys in one place),
+> cross-process coordination (the cache pilot), learning loops, or the
+> observability surfaces.
+
 - **OpenAI-compatible.** Agents point `base_url` here and change nothing else.
 - **Intent-based routing.** Layered classification (declared → rules → embeddings
   → small-model), mapped to capability tiers.
